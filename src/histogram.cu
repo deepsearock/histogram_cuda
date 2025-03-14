@@ -186,7 +186,6 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
 
 int main(int argc, char *argv[]) {
     // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
-    // Note: With a fixed block dimension of 32x32, total threads per block is 1024.
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
         fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [GridSize]\n", argv[0]);
         return 1;
@@ -268,7 +267,9 @@ int main(int argc, char *argv[]) {
     cudaEventElapsedTime(&elapsedTime, start, stop);
     
     // Calculate measured throughput based on approximate atomic operations.
-    double totalOps = (double) N + (gridSize * numBins); // approximate total operations
+    // Per-element operations: ~3 operations per element
+    // Final merge: gridSize * numBins operations.
+    double totalOps = 3.0 * N + (gridSize * numBins);
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
     double measuredGFlops = opsPerSec / 1e9;
