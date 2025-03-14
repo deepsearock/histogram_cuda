@@ -285,12 +285,14 @@ int main(int argc, char *argv[]) {
     printf("Clock Rate: %0.2f GHz\n", clockHz / 1e9);
     printf("Theoretical Peak Ops/sec (int): %e ops/sec\n", theoreticalOps);
     
-    // (Optional) Copy final histogram from device to host and print nonzero bins.
+    // Copy final histogram from device to host.
     int *h_finalHist = (int*) malloc(finalHistSize);
     cudaMemcpy(h_finalHist, d_finalHist, finalHistSize, cudaMemcpyDeviceToHost);
+    
+    // Print all histogram bins.
+    printf("Final Histogram Bins:\n");
     for (int i = 0; i < numBins; i++) {
-        if (h_finalHist[i] != 0)
-            printf("Bin %d: %d\n", i, h_finalHist[i]);
+        printf("Bin %d: %d\n", i, h_finalHist[i]);
     }
     
     // Clean up.
