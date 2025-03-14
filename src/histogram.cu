@@ -133,8 +133,9 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
                 if (!foundBin) {
                     #pragma unroll
                     for (int j = 0; j < 8; j++) {
-                        if (localHist[j] > 0)
+                        if (localHist[j] > 0 && localBins[j] >= 0 && localBins[j] < numBins) {
                             atomicAdd(&warpHist[warp_id * numBins + localBins[j]], localHist[j]);
+                        }
                         localBins[j] = -1;
                         localHist[j] = 0;
                     }
@@ -146,8 +147,9 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
             // Flush any remaining counts
             #pragma unroll
             for (int j = 0; j < 8; j++) {
-                if (localHist[j] > 0)
+                if (localHist[j] > 0 && localBins[j] >= 0 && localBins[j] < numBins) {
                     atomicAdd(&warpHist[warp_id * numBins + localBins[j]], localHist[j]);
+                }
             }
         }
         
@@ -193,8 +195,9 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
             if (!foundBin) {
                 #pragma unroll
                 for (int j = 0; j < 8; j++) {
-                    if (localHist[j] > 0)
+                    if (localHist[j] > 0 && localBins[j] >= 0 && localBins[j] < numBins) {
                         atomicAdd(&warpHist[warp_id * numBins + localBins[j]], localHist[j]);
+                    }
                     localBins[j] = -1;
                     localHist[j] = 0;
                 }
@@ -206,8 +209,9 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         // Flush any remaining counts
         #pragma unroll
         for (int j = 0; j < 8; j++) {
-            if (localHist[j] > 0)
+            if (localHist[j] > 0 && localBins[j] >= 0 && localBins[j] < numBins) {
                 atomicAdd(&warpHist[warp_id * numBins + localBins[j]], localHist[j]);
+            }
         }
     }
     block.sync();
@@ -244,23 +248,23 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
         
         int sum = 0;
         // Process multiple blocks per thread to increase work efficiency
-        for (int b = threadIdx.x; b < numBlocks; b += blockDim.x) {
+        for (int b = 0; b < numBlocks; b++) {
             sum += partialHist[b * numBins + bin];
         }
         temp[threadIdx.x] = sum;
         block.sync();
         
         // Perform reduction in shared memory using cooperative groups
-        for (int stride = blockDim.x / 2; stride > 0; stride >>= 2) {
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) { // Changed from stride >>= 2
             if (threadIdx.x < stride) {
                 temp[threadIdx.x] += temp[threadIdx.x + stride];
             }
             block.sync();
         }
         
-        // Write the result
+        // Write the result - fix to use bin index
         if (threadIdx.x == 0) {
-            finalHist[blockIdx.x] = temp[0];
+            finalHist[bin] = temp[0]; // Changed from finalHist[blockIdx.x]
         }
     }
 }
@@ -340,7 +344,8 @@ int main(int argc, char *argv[]) {
     // Launch the reduction kernel.
     int reduceBlockSize = 256;
     int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
-    histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
+    size_t reduceSharedMemSize = reduceBlockSize * sizeof(int);
+    histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize, reduceSharedMemSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
     
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
