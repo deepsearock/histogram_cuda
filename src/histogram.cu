@@ -5,28 +5,34 @@
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
 
-// Optimized histogram kernel with double buffering (for input tiling),
-// vectorized (int4) loads, and per-warp histograms.
+// Optimized histogram kernel with double buffering, vectorized loads,
+// per-warp histograms, bit-shift based bin calculation, and loop unrolling.
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
-    // Dynamic shared memory is split into two regions:
-    // (1) Two input tile buffers (tile0 and tile1).
-    // (2) Per-warp histograms (each of size numBins).
+    // Shared memory layout:
+    // [tile0 | tile1 | per-warp histograms]
     extern __shared__ int sharedMem[];
-    
-    // Each block has blockDim.x * blockDim.y threads.
-    int blockThreads = blockDim.x * blockDim.y;
-    // For vectorized loading, each thread loads 4 ints at once.
-    // Thus, one tile's size (in ints) is: tileSizeInts = blockThreads * 4.
-    int tileSizeInts = blockThreads * 4;
-    // Set up two buffers for double buffering:
-    int *tile0 = sharedMem;                          // first tile buffer (tileSizeInts ints)
-    int *tile1 = sharedMem + tileSizeInts;             // second tile buffer (tileSizeInts ints)
-    // The rest of shared memory is used for per-warp histograms.
-    const int warpSize = 32;
-    int numWarps = blockThreads / warpSize; // assume blockThreads is a multiple of 32
-    int *warpHist = (int*)(sharedMem + 2 * tileSizeInts); // region for per-warp histograms
 
-    // Flatten the 2D thread index.
+    const int warpSize = 32;
+    int blockThreads = blockDim.x * blockDim.y;
+    // Each tile holds blockThreads * 4 integers (vectorized loads: int4)
+    int tileSizeInts = blockThreads * 4;
+    int *tile0 = sharedMem;                      // first tile buffer
+    int *tile1 = sharedMem + tileSizeInts;         // second tile buffer
+    int numWarps = blockThreads / warpSize;        // assume blockThreads is a multiple of 32
+    int *warpHist = (int*)(sharedMem + 2 * tileSizeInts); // per-warp histogram region
+
+    // Precompute the bit-shift factor.
+    // Since 1024 is the max value and numBins is 2^k, each bin spans 1024/numBins values.
+    // log2(1024/numBins) = 10 - log2(numBins)
+    int k = 0;
+    int temp = numBins;
+    while (temp > 1) {
+        k++;
+        temp >>= 1;
+    }
+    int shift = 10 - k;  // e.g., if numBins = 8 (k=3), then shift = 7.
+
+    // Flatten the thread index.
     int tid = threadIdx.x + threadIdx.y * blockDim.x;
     int warp_id = tid / warpSize;
     int lane = tid % warpSize;
@@ -37,77 +43,74 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     }
     __syncthreads();
 
-    // Compute the global stride for tiles (in ints).
+    // Compute global tile size (in ints) for double buffering.
     int globalTileSizeInts = gridDim.x * tileSizeInts;
-
-    // We'll use double buffering to load tiles from global memory.
-    // Determine the first offset for this block.
     int firstOffset = blockIdx.x * tileSizeInts;
-    // Load the first tile into tile0.
+
+    // Load the first tile from global memory into tile0.
     if (firstOffset < N) {
         int globalIndex = firstOffset + tid * 4;
         if (globalIndex + 3 < N) {
             int4 tmp = ((const int4*)data)[globalIndex / 4];
-            tile0[tid*4 + 0] = tmp.x;
-            tile0[tid*4 + 1] = tmp.y;
-            tile0[tid*4 + 2] = tmp.z;
-            tile0[tid*4 + 3] = tmp.w;
+            tile0[tid * 4 + 0] = tmp.x;
+            tile0[tid * 4 + 1] = tmp.y;
+            tile0[tid * 4 + 2] = tmp.z;
+            tile0[tid * 4 + 3] = tmp.w;
         } else {
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
-                tile0[tid*4 + i] = (idx < N) ? data[idx] : -1;
+                tile0[tid * 4 + i] = (idx < N) ? data[idx] : -1;
             }
         }
     }
     __syncthreads();
 
-    // Process tiles in a double-buffered pipelined loop.
-    // Start at the second tile.
+    // Process the tiles using double buffering.
     for (int offset = firstOffset + globalTileSizeInts; offset < N; offset += globalTileSizeInts) {
-        // Load next tile into tile1.
+        // Load the next tile into tile1.
         int globalIndex = offset + tid * 4;
         if (globalIndex + 3 < N) {
             int4 tmp = ((const int4*)data)[globalIndex / 4];
-            tile1[tid*4 + 0] = tmp.x;
-            tile1[tid*4 + 1] = tmp.y;
-            tile1[tid*4 + 2] = tmp.z;
-            tile1[tid*4 + 3] = tmp.w;
+            tile1[tid * 4 + 0] = tmp.x;
+            tile1[tid * 4 + 1] = tmp.y;
+            tile1[tid * 4 + 2] = tmp.z;
+            tile1[tid * 4 + 3] = tmp.w;
         } else {
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
-                tile1[tid*4 + i] = (idx < N) ? data[idx] : -1;
+                tile1[tid * 4 + i] = (idx < N) ? data[idx] : -1;
             }
         }
         __syncthreads();
 
-        // Process the tile in tile0.
+        // Process the current tile (in tile0) using a per-thread run-length aggregation.
         {
             int localBin = -1;
             int localCount = 0;
+            #pragma unroll
             for (int i = tid; i < tileSizeInts; i += blockThreads) {
                 int value = tile0[i];
                 if (value < 0) continue;
-                int bin = value / (1024 / numBins);
+                // Use bit shift instead of division.
+                int bin = value >> shift;
                 if (bin == localBin) {
                     localCount++;
                 } else {
-                    if (localCount > 0) {
+                    if (localCount > 0)
                         atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
-                    }
                     localBin = bin;
                     localCount = 1;
                 }
             }
-            if (localCount > 0) {
+            if (localCount > 0)
                 atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
-            }
         }
         __syncthreads();
 
-        // Swap buffers: tile1 becomes the current tile for next iteration.
-        int *temp = tile0;
+        // Swap tile buffers.
+        int *tempPtr = tile0;
         tile0 = tile1;
-        tile1 = temp;
+        tile1 = tempPtr;
         __syncthreads();
     }
 
@@ -115,27 +118,26 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     {
         int localBin = -1;
         int localCount = 0;
+        #pragma unroll
         for (int i = tid; i < tileSizeInts; i += blockThreads) {
             int value = tile0[i];
             if (value < 0) continue;
-            int bin = value / (1024 / numBins);
+            int bin = value >> shift;
             if (bin == localBin) {
                 localCount++;
             } else {
-                if (localCount > 0) {
+                if (localCount > 0)
                     atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
-                }
                 localBin = bin;
                 localCount = 1;
             }
         }
-        if (localCount > 0) {
+        if (localCount > 0)
             atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
-        }
     }
     __syncthreads();
 
-    // Reduce per-warp histograms into a single block-level (partial) histogram.
+    // Reduce the per-warp histograms into a block-level (partial) histogram.
     if (warp_id == 0) {
         for (int i = lane; i < numBins; i += warpSize) {
             int sum = 0;
@@ -193,8 +195,8 @@ int main(int argc, char *argv[]) {
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
-    //   Two tile buffers: 2 * tileSizeInts, where tileSizeInts = block.x * block.y * 4.
-    //   Plus per-warp histogram: numWarps * numBins integers.
+    // Two tile buffers: 2 * tileSizeInts, where tileSizeInts = block.x * block.y * 4.
+    // Plus per-warp histogram: numWarps * numBins integers.
     int tileSizeInts = block.x * block.y * 4;
     int numWarps = (block.x * block.y) / 32;
     size_t sharedMemSize = (2 * tileSizeInts + numWarps * numBins) * sizeof(int);
@@ -260,20 +262,18 @@ int main(int argc, char *argv[]) {
     // Calculate occupancy.
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, 0);
-    int maxThreadsPerSM = deviceProp.maxThreadsPerMultiProcessor;  // e.g., 2048 for V100
+    int maxThreadsPerSM = deviceProp.maxThreadsPerMultiProcessor;
     int activeBlocks;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, histogram_optimized_kernel, blockSizeTotal, sharedMemSize);
     float occupancy = (activeBlocks * blockSizeTotal) / (float) maxThreadsPerSM;
-    occupancy = occupancy * 100.0f;  // percentage
+    occupancy = occupancy * 100.0f;
     printf("Occupancy per SM: %f %%\n", occupancy);
     
-    // Acquire GPU specifications and calculate theoretical peak integer operations per second.
-    // For a Volta-like GPU, assume 64 integer (or FP32) cores per SM and 2 ops per cycle.
+    // Display device properties.
     int coresPerSM = 64;
     int totalCores = deviceProp.multiProcessorCount * coresPerSM;
-    // deviceProp.clockRate is in kHz; convert to Hz:
     double clockHz = deviceProp.clockRate * 1000.0;
-    double theoreticalOps = totalCores * clockHz * 2;  // 2 ops per cycle
+    double theoreticalOps = totalCores * clockHz * 2;
     printf("Device: %s\n", deviceProp.name);
     printf("Number of SMs: %d\n", deviceProp.multiProcessorCount);
     printf("Cores per SM: %d\n", coresPerSM);
