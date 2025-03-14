@@ -47,11 +47,13 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     int globalTileSizeInts = gridDim.x * tileSizeInts;
     int firstOffset = blockIdx.x * tileSizeInts;
 
-    // Load the first tile from global memory into tile0.
+    // Load the first tile from global memory into tile0 using __ldg and prefetching.
     if (firstOffset < N) {
         int globalIndex = firstOffset + tid * 4;
+        // Prefetch future data (64 is an arbitrary offset; adjust as needed)
+        __prefetch(&data[globalIndex + 64]);
         if (globalIndex + 3 < N) {
-            int4 tmp = ((const int4*)data)[globalIndex / 4];
+            int4 tmp = __ldg(reinterpret_cast<const int4*>(&data[globalIndex]));
             tile0[tid * 4 + 0] = tmp.x;
             tile0[tid * 4 + 1] = tmp.y;
             tile0[tid * 4 + 2] = tmp.z;
@@ -59,18 +61,20 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         } else {
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
-                tile0[tid * 4 + i] = (idx < N) ? data[idx] : -1;
+                tile0[tid * 4 + i] = (idx < N) ? __ldg(&data[idx]) : -1;
             }
         }
     }
     __syncthreads();
 
     // Process the tiles using double buffering.
+    // In the double-buffering loop, prefetch the next tile and load using __ldg.
     for (int offset = firstOffset + globalTileSizeInts; offset < N; offset += globalTileSizeInts) {
-        // Load the next tile into tile1.
         int globalIndex = offset + tid * 4;
+        // Prefetch a future block of data. Adjust "64" as a prefetch distance.
+        __prefetch(&data[globalIndex + 64]);
         if (globalIndex + 3 < N) {
-            int4 tmp = ((const int4*)data)[globalIndex / 4];
+            int4 tmp = __ldg(reinterpret_cast<const int4*>(&data[globalIndex]));
             tile1[tid * 4 + 0] = tmp.x;
             tile1[tid * 4 + 1] = tmp.y;
             tile1[tid * 4 + 2] = tmp.z;
@@ -78,7 +82,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         } else {
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
-                tile1[tid * 4 + i] = (idx < N) ? data[idx] : -1;
+                tile1[tid * 4 + i] = (idx < N) ? __ldg(&data[idx]) : -1;
             }
         }
         __syncthreads();
