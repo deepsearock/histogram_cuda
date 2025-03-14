@@ -193,7 +193,7 @@ int main(int argc, char *argv[]) {
     cudaGetDeviceProperties(&deviceProp, 0);
     int maxThreadsPerSM = deviceProp.maxThreadsPerMultiProcessor;  // e.g., 2048 for V100
     int activeBlocks;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, histogram_optimized_kernel, blockSizeTotal, sharedMemSize);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, histogram_kernel, blockSizeTotal, sharedMemSize);
     float occupancy = (activeBlocks * blockSizeTotal) / (float) maxThreadsPerSM;
     occupancy = occupancy * 100.0f;  // percentage
     printf("Occupancy per SM: %f %%\n", occupancy);
