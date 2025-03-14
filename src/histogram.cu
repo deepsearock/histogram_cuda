@@ -3,131 +3,157 @@
 #include <cuda.h>
 #include <time.h>
 
-// Histogram kernel: each block computes a local histogram in shared memory.
-__global__ void histogram_kernel(const int *data, int *hist, int N, int numBins) {
-    // Declare dynamic shared memory for the block's histogram.
-    extern __shared__ int hist_s[];
-
+// First kernel: compute per-block (partial) histograms using shared memory.
+__global__ void histogram_partial_kernel(const int *data, int *partialHist, int N, int numBins) {
+    // Allocate dynamic shared memory for this block's histogram.
+    extern __shared__ int localHist[];
+    
     int tid = threadIdx.x;
-    // Initialize the shared histogram bins to zero.
+    // Initialize the local (shared) histogram.
     for (int i = tid; i < numBins; i += blockDim.x) {
-        hist_s[i] = 0;
+        localHist[i] = 0;
     }
     __syncthreads();
 
-    // Each thread processes a strided portion of the input vector.
+    // Each thread processes a strided portion of the input.
     int idx = blockIdx.x * blockDim.x + tid;
     int stride = blockDim.x * gridDim.x;
     while (idx < N) {
         int value = data[idx];
-        // Map the value [0, 1023] to a bin [0, numBins-1].
+        // Map value [0, 1023] to one of the bins.
         int bin = value / (1024 / numBins);
-        atomicAdd(&hist_s[bin], 1);
+        atomicAdd(&localHist[bin], 1);
         idx += stride;
     }
     __syncthreads();
 
-    // Merge the block's shared histogram into the global histogram.
+    // Write the block's partial histogram to global memory.
     for (int i = tid; i < numBins; i += blockDim.x) {
-        atomicAdd(&hist[i], hist_s[i]);
+        partialHist[blockIdx.x * numBins + i] = localHist[i];
+    }
+}
+
+// Second kernel: reduce the partial histograms into a final histogram.
+__global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
+    int bin = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bin < numBins) {
+        int sum = 0;
+        for (int b = 0; b < numBlocks; b++) {
+            sum += partialHist[b * numBins + bin];
+        }
+        finalHist[bin] = sum;
     }
 }
 
 int main(int argc, char *argv[]) {
-    // Expect command line: ./histogram_atomic -i <BinNum> <VecDim>
-    if (argc != 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
-        fprintf(stderr, "Usage: %s -i <BinNum> <VecDim>\n", argv[0]);
+    // Expected command-line usage:
+    // ./histogram_atomic -i <BinNum> <VecDim> [BlockSize] [GridSize]
+    if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
+        fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [BlockSize] [GridSize]\n", argv[0]);
         return 1;
     }
 
-    // Parse command line parameters.
+    // Parse input parameters.
     int numBins = atoi(argv[2]);
     int N = atoi(argv[3]);
 
-    // Validate numBins: must be 2^k for k from 2 to 8 (i.e. 4, 8, 16, 32, 64, 128, or 256).
+    // Validate numBins: must be a power of 2 with k from 2 to 8 (i.e. 4 to 256).
     if (numBins < 4 || numBins > 256 || (numBins & (numBins - 1)) != 0) {
         fprintf(stderr, "Error: <BinNum> must be 2^k with k from 2 to 8 (e.g. 4, 8, 16, 32, 64, 128, or 256).\n");
         return 1;
     }
 
-    size_t dataSize = N * sizeof(int);
-    size_t histSize = numBins * sizeof(int);
+    // Optionally accept custom block and grid sizes.
+    int blockSize = 256;
+    int gridSize;
+    if (argc >= 5)
+        blockSize = atoi(argv[4]);
+    if (argc >= 6)
+        gridSize = atoi(argv[5]);
+    else
+        gridSize = (N + blockSize - 1) / blockSize;
 
-    // Allocate host memory and generate random input data (values between 0 and 1023).
+    size_t dataSize = N * sizeof(int);
+    size_t finalHistSize = numBins * sizeof(int);
+    size_t partialHistSize = gridSize * numBins * sizeof(int);
+
+    // Allocate and initialize host memory for the input vector.
     int *h_data = (int*) malloc(dataSize);
     if (!h_data) {
-        fprintf(stderr, "Failed to allocate host memory.\n");
+        fprintf(stderr, "Failed to allocate host memory for input vector.\n");
         return 1;
     }
     srand(time(NULL));
     for (int i = 0; i < N; i++) {
-        h_data[i] = rand() % 1024;
+        h_data[i] = rand() % 1024;  // Random integers in [0, 1023]
     }
 
     // Allocate device memory.
-    int *d_data, *d_hist;
+    int *d_data, *d_finalHist, *d_partialHist;
     cudaMalloc((void**)&d_data, dataSize);
-    cudaMalloc((void**)&d_hist, histSize);
+    cudaMalloc((void**)&d_finalHist, finalHistSize);
+    cudaMalloc((void**)&d_partialHist, partialHistSize);
 
-    // Copy the input vector from host to device.
+    // Copy input data from host to device.
     cudaMemcpy(d_data, h_data, dataSize, cudaMemcpyHostToDevice);
+    cudaMemset(d_finalHist, 0, finalHistSize);
+    cudaMemset(d_partialHist, 0, partialHistSize);
 
-    // Initialize the global histogram on the device to zero.
-    cudaMemset(d_hist, 0, histSize);
-
-    // Define grid and block dimensions.
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
-
-    // Create CUDA events for timing the kernel.
+    // Create CUDA events for timing.
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // Record the start event.
+    // Record start event.
     cudaEventRecord(start, 0);
 
-    // Launch the histogram kernel with dynamic shared memory size (numBins * sizeof(int)).
-    histogram_kernel<<<blocksPerGrid, threadsPerBlock, histSize>>>(d_data, d_hist, N, numBins);
+    // Launch the partial histogram kernel.
+    // Shared memory size is set to numBins * sizeof(int).
+    histogram_partial_kernel<<<gridSize, blockSize, numBins * sizeof(int)>>>(d_data, d_partialHist, N, numBins);
 
-    // Record the stop event and wait for the kernel to finish.
+    // Launch the reduction kernel to combine the partial histograms.
+    // We launch one thread per bin.
+    int reduceBlockSize = 256;
+    int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
+    histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
+
+    // Record stop event and synchronize.
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
 
-    // Compute the elapsed time in milliseconds.
+    // Calculate elapsed time in milliseconds.
     float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
 
-    // Compute total atomic operations:
-    // - One per processed element (from the main loop).
-    // - Plus one per bin per block during the merge phase.
-    double totalOps = (double) N + (blocksPerGrid * numBins);
-    double elapsedSec = elapsedTime / 1000.0;  // Convert ms to seconds.
+    // Compute total operations:
+    // - In the partial histogram kernel, one atomic op per processed element.
+    // - Plus gridSize * numBins writes during the local-to-global merge.
+    double totalOps = (double)N + (double)(gridSize * numBins);
+    double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
-    // Report throughput in "TFLOPS" (here, one atomic op is counted as one operation).
-    double tflops = opsPerSec / 1e12;
+    double tflops = opsPerSec / 1e12;  // Note: Here "TFLOPS" is a throughput metric.
 
-    // Report performance.
-    printf("Histogram kernel execution time: %f ms\n", elapsedTime);
-    printf("Total atomic operations: %.0f\n", totalOps);
+    printf("Total kernel execution time: %f ms\n", elapsedTime);
+    printf("Total operations (atomic updates + merge writes): %.0f\n", totalOps);
     printf("Throughput: %e ops/sec\n", opsPerSec);
     printf("Performance: %f TFLOPS\n", tflops);
 
-    // Copy the computed histogram back to the host.
-    int *h_hist = (int*) malloc(histSize);
-    cudaMemcpy(h_hist, d_hist, histSize, cudaMemcpyDeviceToHost);
+    // Copy final histogram from device to host.
+    int *h_finalHist = (int*) malloc(finalHistSize);
+    cudaMemcpy(h_finalHist, d_finalHist, finalHistSize, cudaMemcpyDeviceToHost);
 
-    // Optionally, print out nonzero histogram bins.
+    // Optionally, print nonzero bins.
     for (int i = 0; i < numBins; i++) {
-        if (h_hist[i] != 0)
-            printf("Bin %d: %d\n", i, h_hist[i]);
+        if (h_finalHist[i] != 0)
+            printf("Bin %d: %d\n", i, h_finalHist[i]);
     }
 
     // Clean up.
     free(h_data);
-    free(h_hist);
+    free(h_finalHist);
     cudaFree(d_data);
-    cudaFree(d_hist);
+    cudaFree(d_finalHist);
+    cudaFree(d_partialHist);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
