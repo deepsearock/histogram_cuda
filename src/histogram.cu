@@ -7,7 +7,7 @@ namespace cg = cooperative_groups;
 
 // Optimized histogram kernel with double buffering, vectorized loads,
 // per-warp histograms, bit-shift based bin calculation, and loop unrolling.
-__global__ void hierarchical_histogram_kernel(const int *data, int *partialHist, int N, int numBins) {
+__global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
     // We use shared memory for per-warp histograms.
     // The shared memory size should be at least (numWarps * numBins) integers.
     extern __shared__ int warpHist[];
