@@ -7,30 +7,28 @@ namespace cg = cooperative_groups;
 
 // Optimized histogram kernel with double buffering, vectorized loads,
 // per-warp histograms, bit-shift based bin calculation, and loop unrolling.
-#include <cuda.h>
-#include <cooperative_groups.h>
-namespace cg = cooperative_groups;
-
-__global__ void histogram_optimized_kernel(const int * __restrict__ data, int *partialHist, int N, int numBins) {
+__global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
     // Shared memory layout:
     // [tile0 | tile1 | per-warp histograms]
     extern __shared__ int sharedMem[];
 
     const int warpSize = 32;
     int blockThreads = blockDim.x * blockDim.y;
-    // Each tile holds blockThreads * 4 integers (using int4 loads).
+    // Each tile holds blockThreads * 4 integers (vectorized loads: int4)
     int tileSizeInts = blockThreads * 4;
     int *tile0 = sharedMem;                      // first tile buffer
     int *tile1 = sharedMem + tileSizeInts;         // second tile buffer
     int numWarps = blockThreads / warpSize;        // assume blockThreads is a multiple of 32
-    int *warpHist = sharedMem + 2 * tileSizeInts;    // per-warp histogram region
+    int *warpHist = (int*)(sharedMem + 2 * tileSizeInts); // per-warp histogram region
 
     // Precompute the bit-shift factor.
+    // Since 1024 is the max value and numBins is 2^k, each bin spans 1024/numBins values.
+    // log2(1024/numBins) = 10 - log2(numBins)
     int k = 0;
-    int tmp = numBins;
-    while (tmp > 1) {
+    int temp = numBins;
+    while (temp > 1) {
         k++;
-        tmp >>= 1;
+        temp >>= 1;
     }
     int shift = 10 - k;  // e.g., if numBins = 8 (k=3), then shift = 7.
 
@@ -49,16 +47,15 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
     int globalTileSizeInts = gridDim.x * tileSizeInts;
     int firstOffset = blockIdx.x * tileSizeInts;
 
-    // --- Load the first tile into tile0 synchronously using vectorized loads ---
+    // Load the first tile from global memory into tile0.
     if (firstOffset < N) {
         int globalIndex = firstOffset + tid * 4;
         if (globalIndex + 3 < N) {
-            // Use __ldg to force use of the read-only cache.
-            int4 tmpVal = ((const int4 *)__ldg(&data[globalIndex/4]))[0];
-            tile0[tid * 4 + 0] = tmpVal.x;
-            tile0[tid * 4 + 1] = tmpVal.y;
-            tile0[tid * 4 + 2] = tmpVal.z;
-            tile0[tid * 4 + 3] = tmpVal.w;
+            int4 tmp = ((const int4*)data)[globalIndex / 4];
+            tile0[tid * 4 + 0] = tmp.x;
+            tile0[tid * 4 + 1] = tmp.y;
+            tile0[tid * 4 + 2] = tmp.z;
+            tile0[tid * 4 + 3] = tmp.w;
         } else {
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
@@ -68,32 +65,22 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
     }
     __syncthreads();
 
-    // --- Process tiles with double buffering using asynchronous copy ---
-    // On Volta we can use cp.async to prefetch the next tile into tile1.
+    // Process the tiles using double buffering.
     for (int offset = firstOffset + globalTileSizeInts; offset < N; offset += globalTileSizeInts) {
+        // Load the next tile into tile1.
         int globalIndex = offset + tid * 4;
-        // Asynchronously copy one int4 (16 bytes) from global memory to shared memory.
         if (globalIndex + 3 < N) {
-            // cp.async.cg.shared.global copies 16 bytes.
-            // The destination is tile1 + (tid * 4) (in bytes) and source is data + globalIndex.
-            asm volatile (
-                "cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "l"((unsigned long long)(tile1 + tid*4)),
-                   "l"(data + globalIndex),
-                   "n"(16)
-            );
+            int4 tmp = ((const int4*)data)[globalIndex / 4];
+            tile1[tid * 4 + 0] = tmp.x;
+            tile1[tid * 4 + 1] = tmp.y;
+            tile1[tid * 4 + 2] = tmp.z;
+            tile1[tid * 4 + 3] = tmp.w;
         } else {
-            // Fallback: perform scalar loads.
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
                 tile1[tid * 4 + i] = (idx < N) ? data[idx] : -1;
             }
         }
-        // Commit the asynchronous copy group.
-        asm volatile ("cp.async.commit_group;\n");
-        __syncthreads();
-        // Wait for all async copies in the group to complete.
-        asm volatile ("cp.async.wait_group 0;\n");
         __syncthreads();
 
         // Process the current tile (in tile0) using a per-thread run-length aggregation.
@@ -104,6 +91,7 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
             for (int i = tid; i < tileSizeInts; i += blockThreads) {
                 int value = tile0[i];
                 if (value < 0) continue;
+                // Use bit shift instead of division.
                 int bin = value >> shift;
                 if (bin == localBin) {
                     localCount++;
@@ -119,14 +107,14 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
         }
         __syncthreads();
 
-        // Swap tile buffers so that tile1 (newly loaded) becomes the current tile.
+        // Swap tile buffers.
         int *tempPtr = tile0;
         tile0 = tile1;
         tile1 = tempPtr;
         __syncthreads();
     }
 
-    // --- Process the final tile loaded in tile0 ---
+    // Process the final tile loaded in tile0.
     {
         int localBin = -1;
         int localCount = 0;
@@ -160,7 +148,6 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
         }
     }
 }
-
 
 // Reduction kernel: Sum partial histograms from all blocks into the final histogram.
 __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
@@ -200,7 +187,7 @@ int main(int argc, char *argv[]) {
         gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
     // Set fixed block dimensions: 32 x 32.
-    dim3 block(4, 64);
+    dim3 block(8, 64);
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
