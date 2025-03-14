@@ -13,18 +13,27 @@ __device__ inline void prefetch_global(const void *ptr) {
 // Optimized histogram kernel with double buffering, vectorized loads,
 // per-warp histograms, bit-shift based bin calculation, and loop unrolling.
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
-    // Shared memory layout:
-    // [tile0 | tile1 | per-warp histograms]
+    // Shared memory layout with padding:
+    // [tile0 | padTile] | [tile1 | padTile] | [per-warp histogram with padding per row]
     extern __shared__ int sharedMem[];
 
     const int warpSize = 32;
     int blockThreads = blockDim.x * blockDim.y;
     // Each tile holds blockThreads * 4 integers (vectorized loads: int4)
     int tileSizeInts = blockThreads * 4;
-    int *tile0 = sharedMem;                      // first tile buffer
-    int *tile1 = sharedMem + tileSizeInts;         // second tile buffer
-    int numWarps = blockThreads / warpSize;        // assume blockThreads is a multiple of 32
-    int *warpHist = (int*)(sharedMem + 2 * tileSizeInts); // per-warp histogram region
+    // Padding: one integer per tile.
+    int padTile = 1;
+    // For warpHist, add one integer per histogram row.
+    int padHist = 1;
+
+    int tile0Size = tileSizeInts + padTile;
+    int tile1Size = tileSizeInts + padTile;
+    // Update pointer layout:
+    int *tile0   = sharedMem;                                // tile0 buffer
+    int *tile1   = sharedMem + tile0Size;                    // tile1 buffer, after tile0 and its padding
+    int *warpHist = sharedMem + tile0Size + tile1Size;        // per-warp histogram region
+
+    int numWarps = blockThreads / warpSize; // assuming blockThreads is a multiple of 32
 
     // Precompute the bit-shift factor.
     // Since 1024 is the max value and numBins is 2^k, each bin spans 1024/numBins values.
@@ -106,13 +115,13 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
                     localCount++;
                 } else {
                     if (localCount > 0)
-                        atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
+                        atomicAdd(&warpHist[warp_id * (numBins + padHist) + localBin], localCount);
                     localBin = bin;
                     localCount = 1;
                 }
             }
             if (localCount > 0)
-                atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
+                atomicAdd(&warpHist[warp_id * (numBins + padHist) + localBin], localCount);
         }
         __syncthreads();
 
@@ -146,15 +155,6 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         // For each bin, perform a warp-level reduction using shuffles so that only one thread per warp
         // issues an atomicAdd to the per-warp histogram.
         unsigned mask = 0xffffffff;  // Full warp
-        for (int bin = 0; bin < numBins; bin++) {
-            int sum = localHist[bin];
-            // Reduce across the warp.
-            for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-                sum += __shfl_down_sync(mask, sum, offset);
-            }
-            // Only lane 0 in each warp contributes to the global per-warp histogram.
-            if(lane == 0) {
-                atomicAdd(&warpHist[warp_id * numBins + bin], sum);
             }
         }
     }
