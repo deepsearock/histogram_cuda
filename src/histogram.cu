@@ -78,7 +78,7 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
             // The destination is tile1 + (tid * 4) (in bytes) and source is data + globalIndex.
             asm volatile (
                 "cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"((unsigned long long)(tile1 + tid*4)),
+                :: "l"((unsigned long long)(tile1 + tid*4)),
                    "l"(data + globalIndex),
                    "n"(16)
             );
