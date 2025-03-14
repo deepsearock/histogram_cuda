@@ -56,7 +56,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     if (firstOffset < N) {
         int globalIndex = firstOffset + tid * 4;
         // Prefetch future data (64 is an arbitrary offset; adjust as needed)
-        prefetch_global(&data[globalIndex + 64]);
+        prefetch_global(&data[globalIndex + 128]);
         if (globalIndex + 3 < N) {
             int4 tmp = __ldg(reinterpret_cast<const int4*>(&data[globalIndex]));
             tile0[tid * 4 + 0] = tmp.x;
@@ -77,7 +77,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     for (int offset = firstOffset + globalTileSizeInts; offset < N; offset += globalTileSizeInts) {
         int globalIndex = offset + tid * 4;
         // Prefetch a future block of data. Adjust "64" as a prefetch distance.
-        prefetch_global(&data[globalIndex + 64]);
+        prefetch_global(&data[globalIndex + 128]);
         if (globalIndex + 3 < N) {
             int4 tmp = __ldg(reinterpret_cast<const int4*>(&data[globalIndex]));
             tile1[tid * 4 + 0] = tmp.x;
