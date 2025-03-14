@@ -187,7 +187,7 @@ int main(int argc, char *argv[]) {
         gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
     // Set fixed block dimensions: 32 x 32.
-    dim3 block(8, 64);
+    dim3 block(4, 64);
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
