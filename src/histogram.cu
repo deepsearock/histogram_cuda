@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <time.h>
 #include <cooperative_groups.h>
+#include <cfloat>
 namespace cg = cooperative_groups;
 
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
