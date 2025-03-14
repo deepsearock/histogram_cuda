@@ -192,7 +192,7 @@ int main(int argc, char *argv[]) {
     const int blockSizeTotal = block.x * block.y; // 128 threads per block.
     
     // Each thread now loads 32 integers.
-    int intsPerThread = 32;
+    int intsPerThread = 8;
     int tileSizeInts = blockSizeTotal * intsPerThread;  // 128 * 32 = 4096 integers per block.
     
     // Compute grid size based on the new tile size.
