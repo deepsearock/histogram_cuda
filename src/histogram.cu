@@ -78,7 +78,7 @@ __global__ void histogram_optimized_kernel(const int * __restrict__ data, int *p
             // The destination is tile1 + (tid * 4) (in bytes) and source is data + globalIndex.
             asm volatile (
                 "cp.async.cg.shared.global [%0], [%1], %2;\n"
-                :: "r"(tile1 + tid*4),
+                :: "r"((unsigned long long)(tile1 + tid*4)),
                    "l"(data + globalIndex),
                    "n"(16)
             );
@@ -200,7 +200,7 @@ int main(int argc, char *argv[]) {
         gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
     // Set fixed block dimensions: 32 x 32.
-    dim3 block(8, );
+    dim3 block(4, 64);
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
