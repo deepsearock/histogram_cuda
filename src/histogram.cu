@@ -165,12 +165,12 @@ int main(int argc, char *argv[]) {
     double totalOps = (double) N + (gridSize * numBins); // approximate total operations
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
-    double tflops = opsPerSec / 1e12;  // "TFLOPS" metric
+    double gflops = opsPerSec / 1e9;  // "TFLOPS" metric
 
     printf("Total kernel execution time: %f ms\n", elapsedTime);
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Throughput: %e ops/sec\n", opsPerSec);
-    printf("Performance: %f TFLOPS\n", tflops);
+    printf("Performance: %f TFLOPS\n", gflops);
 
     // Copy final histogram back to host.
     int *h_finalHist = (int*) malloc(finalHistSize);
