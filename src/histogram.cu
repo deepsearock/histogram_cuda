@@ -13,13 +13,18 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     extern __shared__ int sharedMem[];
 
     const int warpSize = 32;
-    int blockThreads = blockDim.x * blockDim.y;
-    // Each tile now holds blockThreads * 32 integers.
-    int tileSizeInts = blockThreads * 32;
-    int *tile0 = sharedMem;                     // first tile buffer
-    int *tile1 = sharedMem + tileSizeInts;        // second tile buffer
-    int numWarps = blockThreads / warpSize;       // assume blockThreads is a multiple of 32
-    int *warpHist = (int*)(sharedMem + 2 * tileSizeInts); // per-warp histogram region
+    const int blockThreads = blockDim.x * blockDim.y;
+    // Each thread loads 32 integers.
+    const int intsPerThread = 32;
+    const int tileSizeInts = blockThreads * intsPerThread; // Total integers in a tile
+
+    // Pointers for double-buffered tile buffers.
+    int *tile0 = sharedMem;                    
+    int *tile1 = sharedMem + tileSizeInts;       
+
+    // Per-warp histogram region follows the two tile buffers.
+    const int numWarps = blockThreads / warpSize;
+    int *warpHist = sharedMem + 2 * tileSizeInts;  // length = numWarps * numBins
 
     // Precompute the bit-shift factor.
     int k = 0;
@@ -28,75 +33,78 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         k++;
         temp >>= 1;
     }
-    int shift = 10 - k;  // e.g., if numBins = 8 (k=3), then shift = 7.
+    const int shift = 10 - k;  // e.g., if numBins = 8, then shift = 7.
 
-    // Flatten the thread index.
-    int tid = threadIdx.x + threadIdx.y * blockDim.x;
-    int warp_id = tid / warpSize;
-    int lane = tid % warpSize;
+    // Compute flattened thread id.
+    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    const int warp_id = tid / warpSize;
+    const int lane = tid % warpSize;
 
-    // Initialize per-warp histograms.
+    // Initialize the per-warp histograms.
     for (int i = lane; i < numWarps * numBins; i += warpSize) {
         warpHist[i] = 0;
     }
     __syncthreads();
 
-    // Compute global tile size (in ints) for double buffering.
-    int globalTileSizeInts = gridDim.x * tileSizeInts;
-    int firstOffset = blockIdx.x * tileSizeInts;
+    // Each block processes tiles in a grid-stride loop.
+    // Each tile has tileSizeInts integers.
+    const int tileGlobalSize = gridDim.x * tileSizeInts;
+    const int firstOffset = blockIdx.x * tileSizeInts;
 
-    // --- Load first tile into tile0 ---
-    if (firstOffset < N) {
-        int globalIndex = firstOffset + tid * 32;
-        // If at least 32 ints remain for this thread, load them via eight int4 loads.
-        if (globalIndex + 31 < N) {
+    // --- Load the first tile into tile0 ---
+    {
+        int globalIndex = firstOffset + tid * intsPerThread;
+        if (globalIndex + intsPerThread - 1 < N) {
+            // Load via vectorized int4 loads (8 iterations * 4 ints = 32 ints)
             #pragma unroll
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < intsPerThread / 4; i++) {
                 int4 tmp = ((const int4*)data)[(globalIndex + i * 4) / 4];
-                int base = tid * 32 + i * 4;
+                int base = tid * intsPerThread + i * 4;
                 tile0[base + 0] = tmp.x;
                 tile0[base + 1] = tmp.y;
                 tile0[base + 2] = tmp.z;
                 tile0[base + 3] = tmp.w;
             }
         } else {
-            // Near the end: load one int at a time.
-            for (int i = 0; i < 32; i++) {
+            // If there aren’t enough elements, load one int at a time.
+            for (int i = 0; i < intsPerThread; i++) {
                 int idx = globalIndex + i;
-                tile0[tid * 32 + i] = (idx < N) ? data[idx] : -1;
+                tile0[tid * intsPerThread + i] = (idx < N) ? data[idx] : -1;
             }
         }
     }
     __syncthreads();
 
-    // --- Process tiles using double buffering ---
-    for (int offset = firstOffset + globalTileSizeInts; offset < N; offset += globalTileSizeInts) {
-        // Load the next tile into tile1.
-        int globalIndex = offset + tid * 32;
-        if (globalIndex + 31 < N) {
+    // --- Process subsequent tiles using double buffering ---
+    for (int offset = firstOffset + tileGlobalSize; offset < N; offset += tileGlobalSize) {
+        // Load next tile into tile1.
+        int globalIndex = offset + tid * intsPerThread;
+        if (globalIndex + intsPerThread - 1 < N) {
             #pragma unroll
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < intsPerThread / 4; i++) {
                 int4 tmp = ((const int4*)data)[(globalIndex + i * 4) / 4];
-                int base = tid * 32 + i * 4;
+                int base = tid * intsPerThread + i * 4;
                 tile1[base + 0] = tmp.x;
                 tile1[base + 1] = tmp.y;
                 tile1[base + 2] = tmp.z;
                 tile1[base + 3] = tmp.w;
             }
         } else {
-            for (int i = 0; i < 32; i++) {
+            for (int i = 0; i < intsPerThread; i++) {
                 int idx = globalIndex + i;
-                tile1[tid * 32 + i] = (idx < N) ? data[idx] : -1;
+                tile1[tid * intsPerThread + i] = (idx < N) ? data[idx] : -1;
             }
         }
         __syncthreads();
 
-        // Process the current tile in tile0 with per-thread run-length aggregation.
+        // Process the current tile in tile0.
         {
+            // Each thread processes its own contiguous block of ints.
+            int start = tid * intsPerThread;
+            int end   = start + intsPerThread;
             int localBin = -1;
             int localCount = 0;
-            #pragma unroll
-            for (int i = tid; i < tileSizeInts; i += blockThreads) {
+            for (int i = start; i < end; i++) {
                 int value = tile0[i];
                 if (value < 0) continue;
                 int bin = value >> shift;
@@ -114,7 +122,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         }
         __syncthreads();
 
-        // Swap tile buffers.
+        // Swap tile buffers so that tile1 becomes the current tile.
         int *tempPtr = tile0;
         tile0 = tile1;
         tile1 = tempPtr;
@@ -123,10 +131,11 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 
     // --- Process the final tile loaded in tile0 ---
     {
+        int start = tid * intsPerThread;
+        int end   = start + intsPerThread;
         int localBin = -1;
         int localCount = 0;
-        #pragma unroll
-        for (int i = tid; i < tileSizeInts; i += blockThreads) {
+        for (int i = start; i < end; i++) {
             int value = tile0[i];
             if (value < 0) continue;
             int bin = value >> shift;
@@ -157,6 +166,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 }
 
 
+
 // Reduction kernel: Sum partial histograms from all blocks into the final histogram.
 __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
     int bin = blockIdx.x * blockDim.x + threadIdx.x;
@@ -168,6 +178,7 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
         finalHist[bin] = sum;
     }
 }
+
 
 int main(int argc, char *argv[]) {
     // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
