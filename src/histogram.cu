@@ -5,7 +5,8 @@
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
 
-// Optimized histogram kernel with vectorized (int4) loading and shared memory tiling.
+// Optimized histogram kernel with vectorized (int4) loading, shared memory tiling,
+// and per-warp histograms.
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
     // Dynamic shared memory is split into two regions:
     // (1) tileData: used to stage a tile of input data (as ints)
@@ -19,10 +20,9 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     int tileSizeInts = blockThreads * 4;
     int *tileData = sharedMem; // first tileSizeInts ints
     // The remainder of shared memory is used for per-warp histograms.
-    // Calculate number of warps in the block.
     const int warpSize = 32;
     int numWarps = blockThreads / warpSize; // assume blockThreads is a multiple of 32
-    int *warpHist = (int*)(sharedMem + tileSizeInts); // next region: numWarps * numBins ints
+    int *warpHist = (int*)(sharedMem + tileSizeInts); // region for per-warp histograms
 
     // Flatten the 2D thread index.
     int tid = threadIdx.x + threadIdx.y * blockDim.x;
@@ -49,7 +49,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
             tileData[tid*4 + 2] = tmp.z;
             tileData[tid*4 + 3] = tmp.w;
         } else {
-            // If we are near the end, load scalarly (with bounds checking).
+            // If near the end, load scalarly with bounds checking.
             for (int i = 0; i < 4; i++) {
                 int idx = globalIndex + i;
                 tileData[tid*4 + i] = (idx < N) ? data[idx] : -1; // -1 as invalid marker
@@ -58,13 +58,12 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         __syncthreads();
         
         // Process the tile loaded into shared memory.
-        // Each thread processes a subset of tileData (which now has tileSizeInts elements).
         int localBin = -1;
         int localCount = 0;
         for (int i = tid; i < tileSizeInts; i += blockThreads) {
             int value = tileData[i];
             if (value < 0) continue;  // skip invalid elements
-            // Map value in [0,1023] to a bin in [0, numBins-1].
+            // Map value in [0, 1023] to a bin in [0, numBins-1].
             int bin = value / (1024 / numBins);
             if (bin == localBin) {
                 localCount++;
@@ -96,7 +95,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     }
 }
 
-// Reduction kernel: Sums partial histograms from all blocks into the final histogram.
+// Reduction kernel: Sum partial histograms from all blocks into the final histogram.
 __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
     int bin = blockIdx.x * blockDim.x + threadIdx.x;
     if (bin < numBins) {
@@ -109,7 +108,8 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
 }
 
 int main(int argc, char *argv[]) {
-    // Usage: ./histogram_atomic -i <BinNum> <VecDim> [BlockSize] [GridSize]
+    // Command-line usage:
+    // ./histogram_atomic -i <BinNum> <VecDim> [BlockSize] [GridSize]
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
         fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [BlockSize] [GridSize]\n", argv[0]);
         return 1;
@@ -145,7 +145,6 @@ int main(int argc, char *argv[]) {
     //   tileData: tileSizeInts = block.x * block.y * 4 integers.
     int tileSizeInts = block.x * block.y * 4;
     int numWarps = (block.x * block.y) / 32;
-    // Total shared memory = tileData + warpHist region.
     size_t sharedMemSize = (tileSizeInts + numWarps * numBins) * sizeof(int);
     
     size_t dataSize = N * sizeof(int);
@@ -195,8 +194,8 @@ int main(int argc, char *argv[]) {
     float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
     
-    // Calculate throughput based on approximate atomic operations.
-    double totalOps = (double) N + (gridSize * numBins);
+    // Calculate measured throughput based on approximate atomic operations.
+    double totalOps = (double) N + (gridSize * numBins); // approximate total operations
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
     double measuredGFlops = opsPerSec / 1e9;
@@ -215,6 +214,21 @@ int main(int argc, char *argv[]) {
     float occupancy = (activeBlocks * blockSizeTotal) / (float) maxThreadsPerSM;
     occupancy = occupancy * 100.0f;  // percentage
     printf("Occupancy per SM: %f %%\n", occupancy);
+    
+    // Acquire GPU specifications and calculate theoretical peak operations per second.
+    // For a Volta-like GPU, assume 64 integer (or FP32) cores per SM and 2 operations per cycle.
+    int coresPerSM = 64;
+    int totalCores = deviceProp.multiProcessorCount * coresPerSM;
+    // deviceProp.clockRate is in kHz; convert to Hz by multiplying by 1000.
+    double clockHz = deviceProp.clockRate * 1000.0;
+    // Theoretical peak ops per second:
+    double theoreticalOps = totalCores * clockHz * 2;  // 2 ops per cycle
+    printf("Device: %s\n", deviceProp.name);
+    printf("Number of SMs: %d\n", deviceProp.multiProcessorCount);
+    printf("Cores per SM: %d\n", coresPerSM);
+    printf("Total CUDA Cores: %d\n", totalCores);
+    printf("Clock Rate: %0.2f GHz\n", clockHz / 1e9);
+    printf("Theoretical Peak Ops/sec (int): %e ops/sec\n", theoreticalOps);
     
     // (Optional) Copy final histogram from device to host.
     int *h_finalHist = (int*) malloc(finalHistSize);
