@@ -155,6 +155,15 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         // For each bin, perform a warp-level reduction using shuffles so that only one thread per warp
         // issues an atomicAdd to the per-warp histogram.
         unsigned mask = 0xffffffff;  // Full warp
+        for (int bin = 0; bin < numBins; bin++) {
+            int sum = localHist[bin];
+            // Reduce across the warp.
+            for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+                sum += __shfl_down_sync(mask, sum, offset);
+            }
+            // Only lane 0 in each warp contributes to the global per-warp histogram.
+            if(lane == 0) {
+                atomicAdd(&warpHist[warp_id * (numBins + padHist) + bin], sum);
             }
         }
     }
@@ -165,7 +174,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         for (int i = lane; i < numBins; i += warpSize) {
             int sum = 0;
             for (int w = 0; w < numWarps; w++) {
-                sum += warpHist[w * numBins + i];
+                sum += warpHist[w * (numBins + padHist) + i];
             }
             partialHist[blockIdx.x * numBins + i] = sum;
         }
@@ -217,7 +226,7 @@ int main(int argc, char *argv[]) {
     // Plus per-warp histogram: numWarps * numBins integers.
     int tileSizeInts = block.x * block.y * 4;
     int numWarps = (block.x * block.y) / 32;
-    size_t sharedMemSize = (2 * tileSizeInts + numWarps * numBins) * sizeof(int);
+    size_t sharedMemSize = (2 * (tileSizeInts + 1) + numWarps * (numBins + 1)) * sizeof(int);
     
     size_t dataSize = N * sizeof(int);
     size_t partialHistSize = gridSize * numBins * sizeof(int);
