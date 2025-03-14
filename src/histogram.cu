@@ -8,9 +8,9 @@ namespace cg = cooperative_groups;
 // Optimized histogram kernel with double buffering (for input tiling),
 // vectorized (int4) loads, and per-warp histograms.
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
-    // Dynamic shared memory is split into two regions:
-    // (1) Two input tile buffers (tile0 and tile1).
-    // (2) Per-warp histograms (each of size numBins).
+    // Dynamic shared memory is split into three regions:
+    //  (1) Two tile buffers for double buffering.
+    //  (2) Per-warp histograms.
     extern __shared__ int sharedMem[];
     
     // Each block has blockDim.x * blockDim.y threads.
@@ -40,10 +40,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     // Compute the global stride for tiles (in ints).
     int globalTileSizeInts = gridDim.x * tileSizeInts;
 
-    // We'll use double buffering to load tiles from global memory.
-    // Determine the first offset for this block.
-    int firstOffset = blockIdx.x * tileSizeInts;
     // Load the first tile into tile0.
+    int firstOffset = blockIdx.x * tileSizeInts;
     if (firstOffset < N) {
         int globalIndex = firstOffset + tid * 4;
         if (globalIndex + 3 < N) {
@@ -62,9 +60,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     __syncthreads();
 
     // Process tiles in a double-buffered pipelined loop.
-    // Start at the second tile.
     for (int offset = firstOffset + globalTileSizeInts; offset < N; offset += globalTileSizeInts) {
-        // Load next tile into tile1.
+        // Load the next tile into tile1.
         int globalIndex = offset + tid * 4;
         if (globalIndex + 3 < N) {
             int4 tmp = ((const int4*)data)[globalIndex / 4];
@@ -104,7 +101,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         }
         __syncthreads();
 
-        // Swap buffers: tile1 becomes the current tile for next iteration.
+        // Swap buffers.
         int *temp = tile0;
         tile0 = tile1;
         tile1 = temp;
@@ -267,19 +264,23 @@ int main(int argc, char *argv[]) {
     occupancy = occupancy * 100.0f;  // percentage
     printf("Occupancy per SM: %f %%\n", occupancy);
     
-    // Acquire GPU specifications and calculate theoretical peak integer operations per second.
-    // For a Volta-like GPU, assume 64 integer (or FP32) cores per SM and 2 ops per cycle.
-    int coresPerSM = 64;
+    // Calculate theoretical peak integer ops (compute) based on GPU specs.
+    int coresPerSM = 64; // assumption for Volta-like GPUs
     int totalCores = deviceProp.multiProcessorCount * coresPerSM;
-    // deviceProp.clockRate is in kHz; convert to Hz:
-    double clockHz = deviceProp.clockRate * 1000.0;
-    double theoreticalOps = totalCores * clockHz * 2;  // 2 ops per cycle
-    printf("Device: %s\n", deviceProp.name);
-    printf("Number of SMs: %d\n", deviceProp.multiProcessorCount);
-    printf("Cores per SM: %d\n", coresPerSM);
-    printf("Total CUDA Cores: %d\n", totalCores);
-    printf("Clock Rate: %0.2f GHz\n", clockHz / 1e9);
-    printf("Theoretical Peak Ops/sec (int): %e ops/sec\n", theoreticalOps);
+    double clockHz = deviceProp.clockRate * 1000.0;  // clockRate is in kHz, convert to Hz.
+    double theoreticalOpsCompute = totalCores * clockHz * 2;  // 2 ops per cycle
+    printf("Theoretical Peak Ops/sec (Compute): %e ops/sec\n", theoreticalOpsCompute);
+    
+    // Calculate theoretical memory bandwidth (assume double data rate):
+    double memClockHz = deviceProp.memoryClockRate * 1000.0;
+    double memBusWidthBytes = deviceProp.memoryBusWidth / 8.0;
+    // For DDR (or HBM2 double data rate), multiply by 2.
+    double theoreticalMemBandwidth = memClockHz * memBusWidthBytes * 2;
+    printf("Theoretical Memory Bandwidth: %0.2f GB/s\n", theoreticalMemBandwidth / 1e9);
+    
+    // Effective operations/sec if memory-bound (each int = 4 bytes).
+    double effectiveOpsFromMemory = theoreticalMemBandwidth / 4.0;
+    printf("Theoretical Effective Ops/sec (Memory-bound): %e ops/sec\n", effectiveOpsFromMemory);
     
     // (Optional) Copy final histogram from device to host and print nonzero bins.
     int *h_finalHist = (int*) malloc(finalHistSize);
