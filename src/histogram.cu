@@ -132,12 +132,13 @@ __global__ void histogram_kernel(const int *input, int *global_hist,
 // Host function to run the histogram.
 int main(int argc, char *argv[])
 {
-    if(argc != 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
-        printf("Usage: %s -i <BinNum> <VecDim>\n", argv[0]);
+    // Usage: ./histogram_atomic -i <BinNum> <VecDim> [grid_dim_x grid_dim_y]
+    if(argc != 4 && argc != 6) {
+        printf("Usage: %s -i <BinNum> <VecDim> [grid_dim_x grid_dim_y]\n", argv[0]);
         return EXIT_FAILURE;
     }
     int num_bins = atoi(argv[2]);
-    int vec_dim = atoi(argv[3]);
+    int vec_dim  = atoi(argv[3]);
 
     // Validate that num_bins is a power of 2 between 2 and 256.
     bool valid_bins = false;
@@ -188,7 +189,19 @@ int main(int argc, char *argv[])
 
     // Determine grid dimensions.
     // Each block processes TILE_SIZE elements.
-    int grid_size = (vec_dim + TILE_SIZE - 1) / TILE_SIZE;
+    int grid_size_1D = (vec_dim + TILE_SIZE - 1) / TILE_SIZE;
+    dim3 grid;
+    if(argc == 6) {
+        int grid_x = atoi(argv[4]);
+        int grid_y = atoi(argv[5]);
+        grid = dim3(grid_x, grid_y);
+    } else {
+        grid = dim3(grid_size_1D, 1);
+    }
+
+    // Set block dimension ensuring blockDim.x is a multiple of 32.
+    // For a BLOCK_SIZE = 256, we choose (32,8) since 32*8 = 256.
+    dim3 block(32, BLOCK_SIZE/32);
 
     // Calculate shared memory size:
     // shared histogram: num_bins integers +
@@ -202,8 +215,8 @@ int main(int argc, char *argv[])
     CUDA_CHECK(cudaEventRecord(start, 0));
 
     // Launch the kernel.
-    histogram_kernel<<<grid_size, BLOCK_SIZE, sharedMemSize>>>(d_input, d_hist,
-                                                                 vec_dim, num_bins);
+    histogram_kernel<<<grid, BLOCK_SIZE, sharedMemSize>>>(d_input, d_hist,
+                                                            vec_dim, num_bins);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -213,8 +226,8 @@ int main(int argc, char *argv[])
     float elapsedTime;
     CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start, stop)); // elapsedTime in ms
 
-    // Performance: Calculate total operations. In this example, we count one op per element load plus global atomic histogram updates.
-    double totalOps = (double) vec_dim + (double) grid_size * num_bins;
+    // Performance: Count one op per element load plus global atomic histogram updates.
+    double totalOps = (double) vec_dim + (double) (grid.x * grid.y) * num_bins;
     double opsPerSec = totalOps / (elapsedTime / 1e3);
     printf("Kernel execution time: %f ms\n", elapsedTime);
     printf("Achieved throughput: %e ops/sec (%.2f Gops/sec)\n", opsPerSec, opsPerSec/1e9);
@@ -222,11 +235,9 @@ int main(int argc, char *argv[])
     // Query device properties to calculate theoretical performance.
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
-    // Theoretical memory bandwidth calculation:
-    // memoryClockRate is in kHz, and memoryBusWidth is in bits.
+    // Theoretical memory bandwidth (GB/s):
     double memBandwidthGBs = (prop.memoryClockRate * 1e3) * (prop.memoryBusWidth / 8.0) / 1e9;
-    // Theoretical FP32 performance TFLOPS:
-    // For a V100, assume 64 FP32 cores/SM. Multiply by SM count and clockRate (in GHz).
+    // Theoretical FP32 performance (TFLOPS):
     int coresPerSM = 64; // typical value for V100
     double gpuClockGHz = prop.clockRate * 1e-6; // clockRate is in kHz
     double theoreticalTFLOPS = prop.multiProcessorCount * coresPerSM * gpuClockGHz;
