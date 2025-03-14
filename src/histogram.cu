@@ -239,33 +239,16 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 
 // Reduction kernel using cooperative groups
 __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
-    cg::thread_block block = cg::this_thread_block();
     int bin = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (bin < numBins) {
-        // Use shared memory for intermediate results
-        extern __shared__ int temp[];
-        
+        // Simply compute the sum directly without shared memory
         int sum = 0;
-        // Process multiple blocks per thread to increase work efficiency
         for (int b = 0; b < numBlocks; b++) {
             sum += partialHist[b * numBins + bin];
         }
-        temp[threadIdx.x] = sum;
-        block.sync();
-        
-        // Perform reduction in shared memory using cooperative groups
-        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) { // Changed from stride >>= 2
-            if (threadIdx.x < stride) {
-                temp[threadIdx.x] += temp[threadIdx.x + stride];
-            }
-            block.sync();
-        }
-        
-        // Write the result - fix to use bin index
-        if (threadIdx.x == 0) {
-            finalHist[bin] = temp[0]; // Changed from finalHist[blockIdx.x]
-        }
+        // Write directly to final histogram
+        finalHist[bin] = sum;
     }
 }
 
