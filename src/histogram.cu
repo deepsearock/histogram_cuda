@@ -10,6 +10,14 @@ __device__ inline void prefetch_global(const void *ptr) {
     asm volatile("prefetch.global.L1 [%0];" :: "l"(ptr));
 }
 
+// Inline helper for warp-level sum reduction.
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = 16; offset > 0; offset /= 2) { // assuming warpSize is 32
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
 // Optimized histogram kernel with double buffering, vectorized loads,
 // per-warp histograms, bit-shift based bin calculation, and loop unrolling.
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
@@ -103,25 +111,27 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 
         // Process the current tile (in tile0) using a per-thread run-length aggregation.
         {
-            int localBin = -1;
-            int localCount = 0;
+            // Use a register array for local counts (assuming numBins <= 256).
+            int localHist[256];
             #pragma unroll
+            for (int b = 0; b < numBins; b++) {
+                localHist[b] = 0;
+            }
+            // Each thread processes elements in tile0.
             for (int i = tid; i < tileSizeInts; i += blockThreads) {
                 int value = tile0[i];
                 if (value < 0) continue;
-                // Use bit shift instead of division.
                 int bin = value >> shift;
-                if (bin == localBin) {
-                    localCount++;
-                } else {
-                    if (localCount > 0)
-                        atomicAdd(&warpHist[warp_id * (numBins + padHist) + localBin], localCount);
-                    localBin = bin;
-                    localCount = 1;
+                if (bin < numBins)
+                    localHist[bin]++;
+            }
+            // Aggressively reduce counts per bin within the warp.
+            for (int b = 0; b < numBins; b++) {
+                int sum = warpReduceSum(localHist[b]);
+                if (lane == 0) {
+                    atomicAdd(&warpHist[warp_id * (numBins + padHist) + b], sum);
                 }
             }
-            if (localCount > 0)
-                atomicAdd(&warpHist[warp_id * (numBins + padHist) + localBin], localCount);
         }
         __syncthreads();
 
