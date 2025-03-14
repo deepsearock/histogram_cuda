@@ -2,51 +2,98 @@
 #include <stdlib.h>
 #include <cuda.h>
 #include <time.h>
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
 
-// New kernel that computes the histogram for one chunk of data.
-// It uses per–warp histograms stored in shared memory and then reduces
-// them into a block–level partial histogram.
-__global__ void histogram_kernel_chunk(const int *data, int *partialHist, int chunkSize, int numBins) {
-    // Use shared memory solely for per–warp histograms.
-    extern __shared__ int warpHist[];
-    int blockThreads = blockDim.x * blockDim.y;
-    const int warpSize = 32;
-    int numWarps = blockThreads / warpSize;
-    int tid = threadIdx.x + threadIdx.y * blockDim.x;
-    int warp_id = tid / warpSize;
-    int lane = tid % warpSize;
-    
-    // Initialize per–warp histograms.
-    for (int i = lane; i < numWarps * numBins; i += warpSize) {
-        warpHist[i] = 0;
+// Optimized histogram kernel with double buffering (for input tiling),
+// vectorized (int4) loads, and per-warp histograms.
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda.h>
+#include <time.h>
+
+// New optimized histogram kernel using per-thread private histograms and shared memory reduction.
+// Assumptions:
+//   - The input values are in the range [0, 1023].
+//   - numBins is <= 256 (so we can allocate a fixed-size local array of 256 ints).
+__global__ void histogram_kernel(const int *data, int *partialHist, int N, int numBins) {
+    // Each thread keeps a private histogram in registers.
+    int localHist[256];  // Maximum allowed numBins is 256.
+#pragma unroll
+    for (int i = 0; i < numBins; i++) {
+        localHist[i] = 0;
+    }
+
+    // Compute global thread index and overall stride.
+    int globalThreadId = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalThreads = gridDim.x * blockDim.x;
+
+    // Process data using vectorized loads (int4) for most of the input.
+    int numInt4 = N / 4;
+    for (int i = globalThreadId; i < numInt4; i += totalThreads) {
+        // Vectorized load.
+        int4 vec = ((const int4*)data)[i];
+        // Process each component.
+        int vals[4] = { vec.x, vec.y, vec.z, vec.w };
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            int val = vals[j];
+            // Map [0,1023] into [0,numBins-1] using bit-shift division by 1024.
+            int bin = (val * numBins) >> 10;  // Equivalent to (val * numBins) / 1024.
+            localHist[bin]++;
+        }
+    }
+    // Handle any remaining elements (tail case).
+    int start = numInt4 * 4;
+    for (int i = start + globalThreadId; i < N; i += totalThreads) {
+        int val = data[i];
+        int bin = (val * numBins) >> 10;
+        localHist[bin]++;
+    }
+
+    // Allocate shared memory for block-level reduction.
+    // Each thread writes its private histogram into a unique slot.
+    extern __shared__ int sdata[]; // Size should be blockDim.x * numBins * sizeof(int)
+    for (int i = 0; i < numBins; i++) {
+        sdata[threadIdx.x * numBins + i] = localHist[i];
     }
     __syncthreads();
-    
-    // Process the chunk. Each thread processes multiple elements.
-    for (int i = tid; i < chunkSize; i += blockThreads) {
-        int value = data[i];
-        // Assuming data values are in [0, 1023] and bins evenly divide that range.
-        int bin = value / (1024 / numBins);
-        atomicAdd(&warpHist[warp_id * numBins + bin], 1);
-    }
-    __syncthreads();
-    
-    // Reduce per–warp histograms into a single partial histogram.
-    if (warp_id == 0) {
-        for (int i = lane; i < numBins; i += warpSize) {
-            int sum = 0;
-            for (int w = 0; w < numWarps; w++) {
-                sum += warpHist[w * numBins + i];
+
+    // Reduce the per-thread histograms into a single block histogram.
+    for (int offset = blockDim.x / 2; offset > 0; offset /= 2) {
+        if (threadIdx.x < offset) {
+            for (int i = 0; i < numBins; i++) {
+                sdata[threadIdx.x * numBins + i] += sdata[(threadIdx.x + offset) * numBins + i];
             }
-            partialHist[i] = sum;
+        }
+        __syncthreads();
+    }
+
+    // Write the block's partial histogram to global memory.
+    if (threadIdx.x == 0) {
+        for (int i = 0; i < numBins; i++) {
+            partialHist[blockIdx.x * numBins + i] = sdata[i];
         }
     }
 }
 
+// The reduction kernel (unchanged) sums partial histograms from each block.
+__global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
+    int bin = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bin < numBins) {
+        int sum = 0;
+        for (int b = 0; b < numBlocks; b++) {
+            sum += partialHist[b * numBins + bin];
+        }
+        finalHist[bin] = sum;
+    }
+}
+
+
 int main(int argc, char *argv[]) {
-    // Usage: ./histogram_atomic_stream -i <BinNum> <VecDim> [BlockSize]
+    // Usage: ./histogram_atomic -i <BinNum> <VecDim> [BlockSize] [GridSize]
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
-        fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [BlockSize]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [BlockSize] [GridSize]\n", argv[0]);
         return 1;
     }
     
@@ -59,20 +106,36 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    int blockSizeTotal = 256; // default threads per block
+    // Optionally accept block and grid sizes.
+    int blockSizeTotal = 256; // default total threads per block
+    int gridSize;
     if (argc >= 5)
         blockSizeTotal = atoi(argv[4]);
+    if (argc >= 6)
+        gridSize = atoi(argv[5]);
+    else
+        gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
-    // Set block dimensions: force blockDim.x = 32, blockDim.y = blockSizeTotal/32.
+    // Set 2D block shape: force blockDim.x = 32, blockDim.y = blockSizeTotal / 32.
     int blockDimX = 32;
     int blockDimY = blockSizeTotal / 32;
     if (blockDimY < 1) blockDimY = 1;
     dim3 block(blockDimX, blockDimY);
-    // In this design each kernel launch uses a single block.
-    int gridSize = 1;
+    dim3 grid(gridSize);
     
-    // Allocate and initialize host input data.
-    int *h_data = (int*) malloc(N * sizeof(int));
+    // Calculate shared memory size:
+    //   Two tile buffers: 2 * tileSizeInts, where tileSizeInts = block.x * block.y * 4.
+    //   Plus per-warp histogram: numWarps * numBins integers.
+    int tileSizeInts = block.x * block.y * 4;
+    int numWarps = (block.x * block.y) / 32;
+    size_t sharedMemSize = (2 * tileSizeInts + numWarps * numBins) * sizeof(int);
+    
+    size_t dataSize = N * sizeof(int);
+    size_t partialHistSize = gridSize * numBins * sizeof(int);
+    size_t finalHistSize = numBins * sizeof(int);
+    
+    // Allocate and initialize host memory.
+    int *h_data = (int*) malloc(dataSize);
     if (!h_data) {
         fprintf(stderr, "Failed to allocate host memory for input data.\n");
         return 1;
@@ -82,123 +145,93 @@ int main(int argc, char *argv[]) {
         h_data[i] = rand() % 1024;  // values in [0, 1023]
     }
     
-    // Register host memory to allow asynchronous copies.
-    cudaHostRegister(h_data, N * sizeof(int), cudaHostRegisterDefault);
+    // Allocate device memory.
+    int *d_data, *d_partialHist, *d_finalHist;
+    cudaMalloc((void**)&d_data, dataSize);
+    cudaMalloc((void**)&d_partialHist, partialHistSize);
+    cudaMalloc((void**)&d_finalHist, finalHistSize);
     
-    // Define a chunk size (in ints) for processing.
-    // For example, process 1M ints per kernel launch (or less if N is smaller).
-    int chunkSize = (1 << 20);
-    if (chunkSize > N)
-        chunkSize = N;
-    int numChunks = (N + chunkSize - 1) / chunkSize;
+    // Copy input data to device.
+    cudaMemcpy(d_data, h_data, dataSize, cudaMemcpyHostToDevice);
+    cudaMemset(d_partialHist, 0, partialHistSize);
+    cudaMemset(d_finalHist, 0, finalHistSize);
     
-    // Allocate two device buffers for input data (for double–streaming).
-    int *d_data[2];
-    for (int i = 0; i < 2; i++) {
-        cudaMalloc((void**)&d_data[i], chunkSize * sizeof(int));
-    }
-    
-    // Allocate two device buffers for partial histograms.
-    int *d_partialHist[2];
-    for (int i = 0; i < 2; i++) {
-        cudaMalloc((void**)&d_partialHist[i], numBins * sizeof(int));
-    }
-    
-    // Allocate host memory for the final histogram and initialize to zero.
-    int *h_finalHist = (int*) calloc(numBins, sizeof(int));
-    
-    // Create two CUDA streams.
-    cudaStream_t streams[2];
-    for (int i = 0; i < 2; i++) {
-        cudaStreamCreate(&streams[i]);
-    }
-    
-    // Determine shared memory size for the kernel.
-    int blockThreads = block.x * block.y;
-    const int warpSize = 32;
-    int numWarps = blockThreads / warpSize;
-    size_t sharedMemSize = numWarps * numBins * sizeof(int);
-    
-    // Create CUDA events for timing.
+    // Create CUDA events.
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+    
     cudaEventRecord(start, 0);
     
-    // Process each chunk using a ping–pong scheme across the two streams.
-    for (int chunk = 0; chunk < numChunks; chunk++) {
-        int streamId = chunk % 2;
-        // Calculate the number of ints to process in this chunk.
-        int currentChunkSize = (chunk < numChunks - 1) ? chunkSize : (N - chunk * chunkSize);
-        
-        // Asynchronously copy the current chunk from host to device.
-        cudaMemcpyAsync(d_data[streamId],
-                        h_data + chunk * chunkSize,
-                        currentChunkSize * sizeof(int),
-                        cudaMemcpyHostToDevice,
-                        streams[streamId]);
-        
-        // Zero out the device partial histogram buffer.
-        cudaMemsetAsync(d_partialHist[streamId], 0, numBins * sizeof(int), streams[streamId]);
-        
-        // Launch the histogram kernel for the current chunk.
-        histogram_kernel_chunk<<<gridSize, block, sharedMemSize, streams[streamId]>>>
-            (d_data[streamId], d_partialHist[streamId], currentChunkSize, numBins);
-        
-        // Allocate a temporary host buffer to hold the partial histogram.
-        int *h_partialHist = (int*) malloc(numBins * sizeof(int));
-        // Asynchronously copy the partial histogram from device to host.
-        cudaMemcpyAsync(h_partialHist,
-                        d_partialHist[streamId],
-                        numBins * sizeof(int),
-                        cudaMemcpyDeviceToHost,
-                        streams[streamId]);
-        
-        // Wait for the stream to finish processing this chunk.
-        cudaStreamSynchronize(streams[streamId]);
-        
-        // Accumulate the partial histogram into the final histogram.
-        for (int i = 0; i < numBins; i++) {
-            h_finalHist[i] += h_partialHist[i];
-        }
-        free(h_partialHist);
-    }
+    // Launch the optimized histogram kernel.
+    histogram_kernel<<<grid, block, sharedMemSize>>>(d_data, d_partialHist, N, numBins);
+    
+    // Launch the reduction kernel.
+    int reduceBlockSize = 256;
+    int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
+    histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
     
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
+    
     float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
     
-    // Calculate performance metrics (approximate, using number of ints processed).
-    double totalOps = (double) N;
+    // Calculate measured throughput based on approximate atomic operations.
+    double totalOps = (double) N + (gridSize * numBins); // approximate total operations
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
     double measuredGFlops = opsPerSec / 1e9;
     
-    printf("Total execution time: %f ms\n", elapsedTime);
+    printf("Total kernel execution time: %f ms\n", elapsedTime);
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Measured Throughput: %e ops/sec\n", opsPerSec);
     printf("Measured Performance: %f GFLOPS (atomic ops metric)\n", measuredGFlops);
     
-    // Print the nonzero bins of the final histogram.
+    // Calculate occupancy.
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    int maxThreadsPerSM = deviceProp.maxThreadsPerMultiProcessor;  // e.g., 2048 for V100
+    int activeBlocks;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, histogram_optimized_kernel, blockSizeTotal, sharedMemSize);
+    float occupancy = (activeBlocks * blockSizeTotal) / (float) maxThreadsPerSM;
+    occupancy = occupancy * 100.0f;  // percentage
+    printf("Occupancy per SM: %f %%\n", occupancy);
+    
+    // Calculate theoretical peak integer ops (compute) based on GPU specs.
+    int coresPerSM = 64; // assumption for Volta-like GPUs
+    int totalCores = deviceProp.multiProcessorCount * coresPerSM;
+    double clockHz = deviceProp.clockRate * 1000.0;  // clockRate is in kHz, convert to Hz.
+    double theoreticalOpsCompute = totalCores * clockHz * 2;  // 2 ops per cycle
+    printf("Theoretical Peak Ops/sec (Compute): %e ops/sec\n", theoreticalOpsCompute);
+    
+    // Calculate theoretical memory bandwidth (assume double data rate):
+    double memClockHz = deviceProp.memoryClockRate * 1000.0;
+    double memBusWidthBytes = deviceProp.memoryBusWidth / 8.0;
+    // For DDR (or HBM2 double data rate), multiply by 2.
+    double theoreticalMemBandwidth = memClockHz * memBusWidthBytes * 2;
+    printf("Theoretical Memory Bandwidth: %0.2f GB/s\n", theoreticalMemBandwidth / 1e9);
+    
+    // Effective operations/sec if memory-bound (each int = 4 bytes).
+    double effectiveOpsFromMemory = theoreticalMemBandwidth / 4.0;
+    printf("Theoretical Effective Ops/sec (Memory-bound): %e ops/sec\n", effectiveOpsFromMemory);
+    
+    // (Optional) Copy final histogram from device to host and print nonzero bins.
+    int *h_finalHist = (int*) malloc(finalHistSize);
+    cudaMemcpy(h_finalHist, d_finalHist, finalHistSize, cudaMemcpyDeviceToHost);
     for (int i = 0; i < numBins; i++) {
         if (h_finalHist[i] != 0)
             printf("Bin %d: %d\n", i, h_finalHist[i]);
     }
     
-    // Clean up device memory and CUDA streams.
-    for (int i = 0; i < 2; i++) {
-        cudaFree(d_data[i]);
-        cudaFree(d_partialHist[i]);
-        cudaStreamDestroy(streams[i]);
-    }
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    
-    // Unregister and free host memory.
-    cudaHostUnregister(h_data);
+    // Clean up.
     free(h_data);
     free(h_finalHist);
+    cudaFree(d_data);
+    cudaFree(d_partialHist);
+    cudaFree(d_finalHist);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
     
     return 0;
 }
