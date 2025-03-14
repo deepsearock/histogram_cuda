@@ -269,7 +269,7 @@ int main(int argc, char *argv[]) {
     // Calculate measured throughput based on approximate atomic operations.
     // Per-element operations: ~3 operations per element
     // Final merge: gridSize * numBins operations.
-    double totalOps = 3.0 * N + (gridSize * numBins);
+    double totalOps = 3.0 * N + ((double)N / tileSizeInts) * numBins;
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
     double measuredGFlops = opsPerSec / 1e9;
