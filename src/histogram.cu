@@ -69,7 +69,7 @@ int main(int argc, char *argv[]) {
     if (blockDimY < 1) blockDimY = 1;
     dim3 block(blockDimX, blockDimY);
     // In this design each kernel launch uses a single block.
-    int gridSize = 1;
+    int gridSize = 1024;
     
     // Allocate and initialize host input data.
     int *h_data = (int*) malloc(N * sizeof(int));
