@@ -7,7 +7,7 @@ namespace cg = cooperative_groups;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Optimized histogram kernel with asynchronous shared memory copies and
-// warp-level reduction (in the final block-level reduction).
+// warp-level reduction.
 ////////////////////////////////////////////////////////////////////////////////
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
     // Shared memory layout: [tile0 | tile1 | per-warp histograms]
@@ -15,7 +15,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 
     const int warpSize = 32;
     int blockThreads = blockDim.x * blockDim.y;
-    // Each tile holds blockThreads*4 ints (using vectorized loads of int4)
+    // Each tile holds blockThreads * 4 ints (using vectorized loads of int4)
     int tileSizeInts = blockThreads * 4;
     int *tile0 = sharedMem;                         // first tile buffer
     int *tile1 = sharedMem + tileSizeInts;            // second tile buffer
@@ -49,8 +49,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
             // Copy 16 bytes (4 ints) asynchronously into shared memory.
             asm volatile(
                 "cp.async.cg.shared.global [%0], [%1], %2;\n"
-                : // no outputs
-                : "r"(tile0 + tid*4), "l"(data + globalIndex), "n"(16)
+                :
+                : "r"(tile0 + tid*4), "r"(data + globalIndex), "n"(16)
             );
         } else {
             // Fallback: use regular loads for tail elements.
@@ -60,7 +60,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
             }
         }
     }
-    // Commit the async copy group and wait for completion.
+    // Commit and wait for the asynchronous copy.
     asm volatile("cp.async.commit_group;\n");
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
@@ -72,8 +72,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
         if (globalIndex + 3 < N) {
             asm volatile(
                 "cp.async.cg.shared.global [%0], [%1], %2;\n"
-                : 
-                : "r"(tile1 + tid*4), "l"(data + globalIndex), "n"(16)
+                :
+                : "r"(tile1 + tid*4), "r"(data + globalIndex), "n"(16)
             );
         } else {
             for (int i = 0; i < 4; i++) {
@@ -96,9 +96,6 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
                 if (bin == localBin) {
                     localCount++;
                 } else {
-                    // Instead of immediately calling atomicAdd, one could try a warp-level reduction
-                    // on (localBin, localCount) across lanes. (A full solution would require grouping
-                    // contributions by bin. Here we fall back to an atomicAdd for nonuniform bins.)
                     if (localCount > 0)
                         atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
                     localBin = bin;
@@ -140,11 +137,9 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     __syncthreads();
 
     // --- Final reduction: combine per-warp histograms into a block-level histogram ---
-    // Here we use warp shuffle intrinsics to reduce the contributions among threads in warp 0.
     if (warp_id == 0) {
         for (int i = lane; i < numBins; i += warpSize) {
             int sum = 0;
-            // Each thread in warp 0 loads one element from each warp's histogram row.
             for (int w = 0; w < numWarps; w++) {
                 sum += warpHist[w * numBins + i];
             }
