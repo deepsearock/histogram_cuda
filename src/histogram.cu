@@ -179,15 +179,15 @@ int main(int argc, char *argv[]) {
     }
     
     // With fixed block dimensions (32x32), total threads per block is 1024.
-    const int blockSizeTotal = 8 * 32;
+    const int blockSizeTotal = 64 * 8;
     int gridSize;
     if (argc >= 5)
         gridSize = atoi(argv[4]);
     else
         gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
-    // Set fixed block dimensions: 32 x 32.
-    dim3 block(4, 64);
+    // Set fixed block dimensions: 64 x 8.
+    dim3 block(64, 8);
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
