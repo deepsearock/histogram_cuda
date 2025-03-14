@@ -2,38 +2,76 @@
 #include <stdlib.h>
 #include <cuda.h>
 #include <time.h>
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
 
-// First kernel: compute per-block (partial) histograms using shared memory.
-__global__ void histogram_partial_kernel(const int *data, int *partialHist, int N, int numBins) {
-    // Allocate dynamic shared memory for this block's histogram.
-    extern __shared__ int localHist[];
+// Optimized histogram kernel using per-warp private histograms and register-level accumulation.
+__global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
+    // Allocate dynamic shared memory for per-warp histograms.
+    // Each warp gets numBins integers.
+    extern __shared__ int warpHist[]; // size = (numWarps * numBins)
     
+    const int warpSize = 32;
     int tid = threadIdx.x;
-    // Initialize the local (shared) histogram.
-    for (int i = tid; i < numBins; i += blockDim.x) {
-        localHist[i] = 0;
-    }
-    __syncthreads();
+    int warp_id = tid / warpSize;
+    int lane = tid % warpSize;
+    int numWarps = blockDim.x / warpSize;  // assume blockDim.x is a multiple of 32
 
-    // Each thread processes a strided portion of the input.
+    // Each warp initializes its own portion of the shared memory.
+    for (int i = lane; i < numBins; i += warpSize) {
+        warpHist[warp_id * numBins + i] = 0;
+    }
+    __syncthreads();  // Ensure all warp histograms are zeroed.
+
+    // Process input data using a strided loop.
     int idx = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
+    int stride = gridDim.x * blockDim.x;
+
+    // Use register-level accumulation to batch atomic updates when possible.
+    int localBin = -1;
+    int localCount = 0;
     while (idx < N) {
         int value = data[idx];
-        // Map value [0, 1023] to one of the bins.
+        // Map value in [0, 1023] to a bin [0, numBins-1].
         int bin = value / (1024 / numBins);
-        atomicAdd(&localHist[bin], 1);
+
+        // If the current value maps to the same bin as the previous one,
+        // accumulate the count in a register.
+        if (bin == localBin) {
+            localCount++;
+        } else {
+            // Flush the previous count.
+            if (localCount > 0) {
+                atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
+            }
+            localBin = bin;
+            localCount = 1;
+        }
         idx += stride;
+    }
+    // Flush any remaining count.
+    if (localCount > 0) {
+        atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
     }
     __syncthreads();
 
-    // Write the block's partial histogram to global memory.
-    for (int i = tid; i < numBins; i += blockDim.x) {
-        partialHist[blockIdx.x * numBins + i] = localHist[i];
+    // Now, reduce the per-warp histograms into a single block-level histogram.
+    // Let the first warp (warp_id == 0) perform the reduction.
+    if (warp_id == 0) {
+        for (int i = lane; i < numBins; i += warpSize) {
+            int sum = 0;
+            // Sum the contributions for bin i from all warps.
+            for (int w = 0; w < numWarps; w++) {
+                sum += warpHist[w * numBins + i];
+            }
+            // Write the block's partial histogram for bin i into global memory.
+            partialHist[blockIdx.x * numBins + i] = sum;
+        }
     }
+    // Optionally, you can use __syncwarp() here for finer-grained sync within the first warp.
 }
 
-// Second kernel: reduce the partial histograms into a final histogram.
+// Reduction kernel: sum the partial histograms from all blocks into the final histogram.
 __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
     int bin = blockIdx.x * blockDim.x + threadIdx.x;
     if (bin < numBins) {
@@ -46,24 +84,23 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
 }
 
 int main(int argc, char *argv[]) {
-    // Expected command-line usage:
+    // Command-line usage:
     // ./histogram_atomic -i <BinNum> <VecDim> [BlockSize] [GridSize]
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
         fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [BlockSize] [GridSize]\n", argv[0]);
         return 1;
     }
 
-    // Parse input parameters.
     int numBins = atoi(argv[2]);
     int N = atoi(argv[3]);
 
-    // Validate numBins: must be a power of 2 with k from 2 to 8 (i.e. 4 to 256).
+    // Validate numBins: must be 2^k with k between 2 and 8 (i.e. 4, 8, 16, 32, 64, 128, or 256).
     if (numBins < 4 || numBins > 256 || (numBins & (numBins - 1)) != 0) {
         fprintf(stderr, "Error: <BinNum> must be 2^k with k from 2 to 8 (e.g. 4, 8, 16, 32, 64, 128, or 256).\n");
         return 1;
     }
 
-    // Optionally accept custom block and grid sizes.
+    // Optionally accept block and grid sizes.
     int blockSize = 256;
     int gridSize;
     if (argc >= 5)
@@ -74,8 +111,8 @@ int main(int argc, char *argv[]) {
         gridSize = (N + blockSize - 1) / blockSize;
 
     size_t dataSize = N * sizeof(int);
-    size_t finalHistSize = numBins * sizeof(int);
     size_t partialHistSize = gridSize * numBins * sizeof(int);
+    size_t finalHistSize = numBins * sizeof(int);
 
     // Allocate and initialize host memory for the input vector.
     int *h_data = (int*) malloc(dataSize);
@@ -89,60 +126,57 @@ int main(int argc, char *argv[]) {
     }
 
     // Allocate device memory.
-    int *d_data, *d_finalHist, *d_partialHist;
+    int *d_data, *d_partialHist, *d_finalHist;
     cudaMalloc((void**)&d_data, dataSize);
-    cudaMalloc((void**)&d_finalHist, finalHistSize);
     cudaMalloc((void**)&d_partialHist, partialHistSize);
+    cudaMalloc((void**)&d_finalHist, finalHistSize);
 
-    // Copy input data from host to device.
+    // Copy input data to device.
     cudaMemcpy(d_data, h_data, dataSize, cudaMemcpyHostToDevice);
-    cudaMemset(d_finalHist, 0, finalHistSize);
     cudaMemset(d_partialHist, 0, partialHistSize);
+    cudaMemset(d_finalHist, 0, finalHistSize);
 
-    // Create CUDA events for timing.
+    // Create CUDA events for performance measurement.
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // Record start event.
     cudaEventRecord(start, 0);
 
-    // Launch the partial histogram kernel.
-    // Shared memory size is set to numBins * sizeof(int).
-    histogram_partial_kernel<<<gridSize, blockSize, numBins * sizeof(int)>>>(d_data, d_partialHist, N, numBins);
+    // Launch the optimized histogram kernel.
+    // Allocate shared memory: (numWarps * numBins) integers.
+    int numWarps = blockSize / 32;
+    size_t sharedMemSize = numWarps * numBins * sizeof(int);
+    histogram_optimized_kernel<<<gridSize, blockSize, sharedMemSize>>>(d_data, d_partialHist, N, numBins);
 
-    // Launch the reduction kernel to combine the partial histograms.
-    // We launch one thread per bin.
+    // Launch the reduction kernel to combine partial histograms.
     int reduceBlockSize = 256;
     int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
     histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
 
-    // Record stop event and synchronize.
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
 
-    // Calculate elapsed time in milliseconds.
+    // Measure elapsed time.
     float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
 
-    // Compute total operations:
-    // - In the partial histogram kernel, one atomic op per processed element.
-    // - Plus gridSize * numBins writes during the local-to-global merge.
-    double totalOps = (double)N + (double)(gridSize * numBins);
+    // Compute a throughput metric (each atomic update or merge write counted as an operation).
+    double totalOps = (double) N + (gridSize * numBins); // approximate total operations
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
-    double tflops = opsPerSec / 1e12;  // Note: Here "TFLOPS" is a throughput metric.
+    double tflops = opsPerSec / 1e12;  // "TFLOPS" metric
 
     printf("Total kernel execution time: %f ms\n", elapsedTime);
-    printf("Total operations (atomic updates + merge writes): %.0f\n", totalOps);
+    printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Throughput: %e ops/sec\n", opsPerSec);
     printf("Performance: %f TFLOPS\n", tflops);
 
-    // Copy final histogram from device to host.
+    // Copy final histogram back to host.
     int *h_finalHist = (int*) malloc(finalHistSize);
     cudaMemcpy(h_finalHist, d_finalHist, finalHistSize, cudaMemcpyDeviceToHost);
 
-    // Optionally, print nonzero bins.
+    // Optionally print nonzero bins.
     for (int i = 0; i < numBins; i++) {
         if (h_finalHist[i] != 0)
             printf("Bin %d: %d\n", i, h_finalHist[i]);
@@ -152,8 +186,8 @@ int main(int argc, char *argv[]) {
     free(h_data);
     free(h_finalHist);
     cudaFree(d_data);
-    cudaFree(d_finalHist);
     cudaFree(d_partialHist);
+    cudaFree(d_finalHist);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
