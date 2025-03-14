@@ -187,10 +187,10 @@ int main(int argc, char *argv[]) {
     else
         gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
-    // Set 2D block shape: force blockDim.x = 32, blockDim.y = blockSizeTotal / 32.
-    int blockDimX = 32;
-    int blockDimY = blockSizeTotal / 32;
-    if (blockDimY < 1) blockDimY = 1;
+    // Set block dimensions: fix blockDim.y = 32 and calculate blockDim.x accordingly.
+    int blockDimY = 32;
+    int blockDimX = blockSizeTotal / blockDimY;
+    if (blockDimX < 1) blockDimX = 1;
     dim3 block(blockDimX, blockDimY);
     dim3 grid(gridSize);
     
