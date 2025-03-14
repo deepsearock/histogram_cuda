@@ -7,7 +7,7 @@ namespace cg = cooperative_groups;
 
 // Optimized histogram kernel with double buffering, vectorized loads,
 // per-warp histograms, bit-shift based bin calculation, and loop unrolling.
-__global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
+__global__ void hierarchical_histogram_kernel(const int *data, int *partialHist, int N, int numBins) {
     // We use shared memory for per-warp histograms.
     // The shared memory size should be at least (numWarps * numBins) integers.
     extern __shared__ int warpHist[];
@@ -98,9 +98,19 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
     }
 }
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <cuda.h>
+#include <time.h>
+
+// Declarations for the kernels.
+extern "C" {
+    __global__ void hierarchical_histogram_kernel(const int *data, int *partialHist, int N, int numBins);
+    __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks);
+}
+
 int main(int argc, char *argv[]) {
     // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
-    // Note: With a fixed block dimension of 32x32, total threads per block is 1024.
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
         fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [GridSize]\n", argv[0]);
         return 1;
@@ -115,24 +125,24 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // With fixed block dimensions (32x32), total threads per block is 1024.
-    const int blockSizeTotal = 8 * 32;
+    // Set fixed block dimensions: e.g., 8 x 32 = 256 threads per block.
+    dim3 block(8, 32);
+    const int blockThreads = block.x * block.y; // 256 threads per block.
+    
+    // For our hierarchical kernel, each thread processes intsPerThread integers.
+    const int intsPerThread = 8;
+    // Total work per block is: blockThreads * intsPerThread.
+    // We use a grid-stride loop so grid size can be chosen to cover N.
     int gridSize;
     if (argc >= 5)
         gridSize = atoi(argv[4]);
     else
-        gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
-    
-    // Set fixed block dimensions: 32 x 32.
-    dim3 block(8, 32);
+        gridSize = ((N + intsPerThread * blockThreads - 1) / (intsPerThread * blockThreads));
     dim3 grid(gridSize);
     
-    // Calculate shared memory size:
-    // Two tile buffers: 2 * tileSizeInts, where tileSizeInts = block.x * block.y * 4.
-    // Plus per-warp histogram: numWarps * numBins integers.
-    int tileSizeInts = block.x * block.y * 4;
-    int numWarps = (block.x * block.y) / 32;
-    size_t sharedMemSize = (2 * tileSizeInts + numWarps * numBins) * sizeof(int);
+    // Shared memory: we need one integer per bin for each warp in the block.
+    int numWarps = blockThreads / 32; // 256/32 = 8 warps.
+    size_t sharedMemSize = numWarps * numBins * sizeof(int);
     
     size_t dataSize = N * sizeof(int);
     size_t partialHistSize = gridSize * numBins * sizeof(int);
@@ -167,8 +177,8 @@ int main(int argc, char *argv[]) {
     
     cudaEventRecord(start, 0);
     
-    // Launch the optimized histogram kernel.
-    histogram_optimized_kernel<<<grid, block, sharedMemSize>>>(d_data, d_partialHist, N, numBins);
+    // Launch the hierarchical histogram kernel.
+    hierarchical_histogram_kernel<<<grid, block, sharedMemSize>>>(d_data, d_partialHist, N, numBins);
     
     // Launch the reduction kernel.
     int reduceBlockSize = 256;
@@ -192,34 +202,13 @@ int main(int argc, char *argv[]) {
     printf("Measured Throughput: %e ops/sec\n", opsPerSec);
     printf("Measured Performance: %f GFLOPS (atomic ops metric)\n", measuredGFlops);
     
-    // Calculate occupancy.
-    cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, 0);
-    int maxThreadsPerSM = deviceProp.maxThreadsPerMultiProcessor;
-    int activeBlocks;
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, histogram_optimized_kernel, blockSizeTotal, sharedMemSize);
-    float occupancy = (activeBlocks * blockSizeTotal) / (float) maxThreadsPerSM;
-    occupancy = occupancy * 100.0f;
-    printf("Occupancy per SM: %f %%\n", occupancy);
-    
-    // Display device properties.
-    int coresPerSM = 64;
-    int totalCores = deviceProp.multiProcessorCount * coresPerSM;
-    double clockHz = deviceProp.clockRate * 1000.0;
-    double theoreticalOps = totalCores * clockHz * 2;
-    printf("Device: %s\n", deviceProp.name);
-    printf("Number of SMs: %d\n", deviceProp.multiProcessorCount);
-    printf("Cores per SM: %d\n", coresPerSM);
-    printf("Total CUDA Cores: %d\n", totalCores);
-    printf("Clock Rate: %0.2f GHz\n", clockHz / 1e9);
-    printf("Theoretical Peak Ops/sec (int): %e ops/sec\n", theoreticalOps);
-    
-    // (Optional) Copy final histogram from device to host and print nonzero bins.
+    // (Optional) Copy final histogram from device to host and print histogram bins.
     int *h_finalHist = (int*) malloc(finalHistSize);
     cudaMemcpy(h_finalHist, d_finalHist, finalHistSize, cudaMemcpyDeviceToHost);
+    
+    printf("Final Histogram Bins:\n");
     for (int i = 0; i < numBins; i++) {
-        if (h_finalHist[i] != 0)
-            printf("Bin %d: %d\n", i, h_finalHist[i]);
+        printf("Bin %d: %d\n", i, h_finalHist[i]);
     }
     
     // Clean up.
