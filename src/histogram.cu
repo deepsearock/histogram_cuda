@@ -113,6 +113,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
                 if (value < 0) continue;
                 
                 int bin = value >> shift;
+                // Add range check to protect against invalid bins
+                if (bin < 0 || bin >= numBins) continue;
                 bool foundBin = false;
                 
                 #pragma unroll
@@ -175,6 +177,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
             if (value < 0) continue;
             
             int bin = value >> shift;
+            // Add range check to protect against invalid bins
+            if (bin < 0 || bin >= numBins) continue;
             bool foundBin = false;
             
             #pragma unroll
