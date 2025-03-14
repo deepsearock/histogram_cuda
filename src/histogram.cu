@@ -98,16 +98,6 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
     }
 }
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <cuda.h>
-#include <time.h>
-
-// Declarations for the kernels.
-extern "C" {
-    __global__ void hierarchical_histogram_kernel(const int *data, int *partialHist, int N, int numBins);
-    __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks);
-}
 
 int main(int argc, char *argv[]) {
     // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
