@@ -44,42 +44,62 @@ __global__ void histogram_kernel(const int *input, int *global_hist,
     int *bufferB = bufferA + TILE_SIZE;
 
     // Initialize shared histogram bins to 0.
-    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x)
         sh_hist[i] = 0;
-    }
     __syncthreads();
 
-    // Setup double buffering: current buffer pointer and next buffer pointer.
+    // Setup double buffering: current and next buffer pointers.
     int *currBuffer = bufferA;
     int *nextBuffer = bufferB;
 
     // Global offset for this block’s processing.
-    // Each block processes TILE_SIZE elements per iteration.
     int base_offset = blockIdx.x * TILE_SIZE;
     int elements_in_tile = 0;
 
-    // Load first tile into currBuffer.
+    // --- Load first tile using int4 vectorized loads ---
     if (base_offset < num_elements) {
-        elements_in_tile = (num_elements - base_offset < TILE_SIZE) ?
+        // Compute number of elements to load.
+        elements_in_tile = ((num_elements - base_offset) < TILE_SIZE) ?
                            (num_elements - base_offset) : TILE_SIZE;
-        // Each thread loads as many as necessary.
-        for (int i = threadIdx.x; i < elements_in_tile; i += blockDim.x) {
-            currBuffer[i] = input[base_offset + i];
+
+        // Calculate number of int4 loads and remainder.
+        int num_int4 = elements_in_tile / 4;
+        int remainder = elements_in_tile & 3; // remainder = elements_in_tile % 4
+
+        // Use int4 loads for the main part.
+        const int4* vec_input = reinterpret_cast<const int4*>(input);
+        int4* vec_buffer = reinterpret_cast<int4*>(currBuffer);
+
+        // Each thread loads a strided chunk.
+        for (int i = threadIdx.x; i < num_int4; i += blockDim.x) {
+            // All threads execute the same code path so divergence is minimal.
+            vec_buffer[i] = vec_input[(base_offset / 4) + i];
+        }
+        // Handle remainder uniformly.
+        for (int i = threadIdx.x; i < remainder; i += blockDim.x) {
+            currBuffer[num_int4 * 4 + i] = input[base_offset + num_int4 * 4 + i];
         }
     }
     __syncthreads();
 
     // Process tiles until all input elements are handled.
     while (base_offset < num_elements) {
-        // Preload next tile into nextBuffer if available.
+        // --- Preload next tile using int4 loads (with uniform branch to reduce divergence) ---
         int next_base = base_offset + TILE_SIZE;
         int next_elements = 0;
         bool hasNextTile = (next_base < num_elements);
         if (hasNextTile) {
             next_elements = ((num_elements - next_base) < TILE_SIZE) ?
                              (num_elements - next_base) : TILE_SIZE;
-            for (int i = threadIdx.x; i < next_elements; i += blockDim.x) {
-                nextBuffer[i] = input[next_base + i];
+            int num_int4 = next_elements / 4;
+            int remainder = next_elements & 3;
+            const int4* vec_input_next = reinterpret_cast<const int4*>(input);
+            int4* vec_next = reinterpret_cast<int4*>(nextBuffer);
+            for (int i = threadIdx.x; i < num_int4; i += blockDim.x) {
+                vec_next[i] = vec_input_next[(next_base / 4) + i];
+            }
+            for (int i = threadIdx.x; i < remainder; i += blockDim.x) {
+                nextBuffer[num_int4 * 4 + i] = input[next_base + num_int4 * 4 + i];
             }
         }
         __syncthreads();
@@ -96,11 +116,10 @@ __global__ void histogram_kernel(const int *input, int *global_hist,
         }
         __syncthreads();
 
-        // Double buffering swap: move nextBuffer to current.
+        // Swap buffers.
         currBuffer = nextBuffer;
-        elements_in_tile = next_elements;
+        elements_in_tile = hasNextTile ? next_elements : 0;
         base_offset += TILE_SIZE;
-        // Synchronize before processing next tile.
         __syncthreads();
     }
 
@@ -176,11 +195,44 @@ int main(int argc, char *argv[])
     // two input buffers: 2*TILE_SIZE integers.
     size_t sharedMemSize = num_bins * sizeof(int) + 2 * TILE_SIZE * sizeof(int);
 
+    // Create CUDA events for timing.
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start, 0));
+
     // Launch the kernel.
     histogram_kernel<<<grid_size, BLOCK_SIZE, sharedMemSize>>>(d_input, d_hist,
                                                                  vec_dim, num_bins);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaEventRecord(stop, 0));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+
+    float elapsedTime;
+    CUDA_CHECK(cudaEventElapsedTime(&elapsedTime, start, stop)); // elapsedTime in ms
+
+    // Performance: Calculate total operations. In this example, we count one op per element load plus global atomic histogram updates.
+    double totalOps = (double) vec_dim + (double) grid_size * num_bins;
+    double opsPerSec = totalOps / (elapsedTime / 1e3);
+    printf("Kernel execution time: %f ms\n", elapsedTime);
+    printf("Achieved throughput: %e ops/sec (%.2f Gops/sec)\n", opsPerSec, opsPerSec/1e9);
+
+    // Query device properties to calculate theoretical performance.
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    // Theoretical memory bandwidth calculation:
+    // memoryClockRate is in kHz, and memoryBusWidth is in bits.
+    double memBandwidthGBs = (prop.memoryClockRate * 1e3) * (prop.memoryBusWidth / 8.0) / 1e9;
+    // Theoretical FP32 performance TFLOPS:
+    // For a V100, assume 64 FP32 cores/SM. Multiply by SM count and clockRate (in GHz).
+    int coresPerSM = 64; // typical value for V100
+    double gpuClockGHz = prop.clockRate * 1e-6; // clockRate is in kHz
+    double theoreticalTFLOPS = prop.multiProcessorCount * coresPerSM * gpuClockGHz;
+    printf("Device: %s\n", prop.name);
+    printf("Theoretical Memory Bandwidth: %f GB/s\n", memBandwidthGBs);
+    printf("Theoretical FP32 Performance: %f TFLOPS\n", theoreticalTFLOPS);
 
     // Copy results from device to host.
     CUDA_CHECK(cudaMemcpy(h_hist, d_hist, num_bins * sizeof(int), cudaMemcpyDeviceToHost));
@@ -196,6 +248,8 @@ int main(int argc, char *argv[])
     CUDA_CHECK(cudaFree(d_hist));
     free(h_input);
     free(h_hist);
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
 
     return EXIT_SUCCESS;
 }
