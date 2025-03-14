@@ -125,24 +125,38 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 
     // Process the final tile loaded in tile0.
     {
-        int localBin = -1;
-        int localCount = 0;
+        // Assume numBins is small enough; here we allocate a fixed-size array for local counts.
+        // For maximum flexibility, we allocate up to 256 entries (since k ∈ [2,8]).
+        int localHist[256];
         #pragma unroll
+        for (int b = 0; b < numBins; b++) {
+            localHist[b] = 0;
+        }
+
+        // Each thread processes multiple elements from the current tile.
         for (int i = tid; i < tileSizeInts; i += blockThreads) {
             int value = tile0[i];
             if (value < 0) continue;
+            // Compute bin index via bit-shift.
             int bin = value >> shift;
-            if (bin == localBin) {
-                localCount++;
-            } else {
-                if (localCount > 0)
-                    atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
-                localBin = bin;
-                localCount = 1;
+            if(bin < numBins)
+                localHist[bin]++;
+        }
+
+        // For each bin, perform a warp-level reduction using shuffles so that only one thread per warp
+        // issues an atomicAdd to the per-warp histogram.
+        unsigned mask = 0xffffffff;  // Full warp
+        for (int bin = 0; bin < numBins; bin++) {
+            int sum = localHist[bin];
+            // Reduce across the warp.
+            for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+                sum += __shfl_down_sync(mask, sum, offset);
+            }
+            // Only lane 0 in each warp contributes to the global per-warp histogram.
+            if(lane == 0) {
+                atomicAdd(&warpHist[warp_id * numBins + bin], sum);
             }
         }
-        if (localCount > 0)
-            atomicAdd(&warpHist[warp_id * numBins + localBin], localCount);
     }
     __syncthreads();
 
