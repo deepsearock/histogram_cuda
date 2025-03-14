@@ -14,7 +14,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     const int warpSize = 32;
     const int blockThreads = blockDim.x * blockDim.y;
     // Each thread loads 32 integers.
-    const int intsPerThread = 32;
+    const int intsPerThread = 8;
     const int tileSizeInts = blockThreads * intsPerThread; // total integers per tile
 
     // Pointers to two tile buffers for double buffering.
@@ -188,7 +188,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Use a reduced block size (4 x 32 = 128 threads) to lower shared memory usage.
-    dim3 block(2, 64);
+    dim3 block(4, 64);
     const int blockSizeTotal = block.x * block.y; // 128 threads per block.
     
     // Each thread now loads 32 integers.
