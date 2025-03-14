@@ -172,7 +172,7 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
 
 int main(int argc, char *argv[]) {
     // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
-    // With fixed block dimensions (8 x 32), total threads per block is 8*32 = 256.
+    // (Note: We now use a reduced block size to keep shared memory usage within device limits.)
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
         fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [GridSize]\n", argv[0]);
         return 1;
@@ -187,12 +187,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // Set fixed block dimensions: 8 x 32 (256 threads per block).
-    dim3 block(8, 32);
-    const int blockSizeTotal = block.x * block.y; // 256 threads
+    // Use a reduced block size (4 x 32 = 128 threads) to lower shared memory usage.
+    dim3 block(4, 32);
+    const int blockSizeTotal = block.x * block.y; // 128 threads per block.
     
-    // Each thread now loads 32 integers, so each block processes:
-    int tileSizeInts = blockSizeTotal * 32; // 256 * 32 = 8192 integers per block.
+    // Each thread now loads 32 integers.
+    int intsPerThread = 32;
+    int tileSizeInts = blockSizeTotal * intsPerThread;  // 128 * 32 = 4096 integers per block.
     
     // Compute grid size based on the new tile size.
     int gridSize;
@@ -200,14 +201,13 @@ int main(int argc, char *argv[]) {
         gridSize = atoi(argv[4]);
     else
         gridSize = (N + tileSizeInts - 1) / tileSizeInts;
-    
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
-    // Two tile buffers: each tile holds tileSizeInts integers,
-    // plus per-warp histograms: (blockSizeTotal / 32) * numBins integers.
-    int numWarps = blockSizeTotal / 32;
+    // Two tile buffers (each of tileSizeInts integers) plus per-warp histograms.
+    int numWarps = blockSizeTotal / 32; // 128/32 = 4.
     size_t sharedMemSize = (2 * tileSizeInts + numWarps * numBins) * sizeof(int);
+    printf("Shared memory requested: %zu bytes\n", sharedMemSize);
     
     size_t dataSize = N * sizeof(int);
     size_t partialHistSize = gridSize * numBins * sizeof(int);
@@ -244,11 +244,21 @@ int main(int argc, char *argv[]) {
     
     // Launch the optimized histogram kernel.
     histogram_optimized_kernel<<<grid, block, sharedMemSize>>>(d_data, d_partialHist, N, numBins);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Kernel launch error: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
     
     // Launch the reduction kernel.
     int reduceBlockSize = 256;
     int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
     histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Reduction kernel launch error: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
     
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
@@ -278,7 +288,7 @@ int main(int argc, char *argv[]) {
     printf("Occupancy per SM: %f %%\n", occupancy);
     
     // Display device properties.
-    int coresPerSM = 64;
+    int coresPerSM = 64; // (adjust if needed)
     int totalCores = deviceProp.multiProcessorCount * coresPerSM;
     double clockHz = deviceProp.clockRate * 1000.0;
     double theoreticalOps = totalCores * clockHz * 2;
