@@ -162,9 +162,10 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
 }
 
 int main(int argc, char *argv[]) {
-    // Usage: ./histogram_atomic -i <BinNum> <VecDim> [BlockSize] [GridSize]
+    // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
+    // Note: With a fixed block dimension of 32x32, total threads per block is 1024.
     if (argc < 4 || (argv[1][0] != '-' || argv[1][1] != 'i')) {
-        fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [BlockSize] [GridSize]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -i <BinNum> <VecDim> [GridSize]\n", argv[0]);
         return 1;
     }
     
@@ -177,21 +178,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // Optionally accept block and grid sizes.
-    int blockSizeTotal = 256; // default total threads per block
+    // With fixed block dimensions (32x32), total threads per block is 1024.
+    const int blockSizeTotal = 32 * 32;
     int gridSize;
     if (argc >= 5)
-        blockSizeTotal = atoi(argv[4]);
-    if (argc >= 6)
-        gridSize = atoi(argv[5]);
+        gridSize = atoi(argv[4]);
     else
         gridSize = (N + blockSizeTotal - 1) / blockSizeTotal;
     
-    // Set block dimensions: fix blockDim.y = 32 and calculate blockDim.x accordingly.
-    int blockDimY = 32;
-    int blockDimX = blockSizeTotal / blockDimY;
-    if (blockDimX < 1) blockDimX = 1;
-    dim3 block(blockDimX, blockDimY);
+    // Set fixed block dimensions: 32 x 32.
+    dim3 block(32, 32);
     dim3 grid(gridSize);
     
     // Calculate shared memory size:
