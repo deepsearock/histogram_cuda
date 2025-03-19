@@ -6,18 +6,19 @@
 #include "utils.cuh"
 
 #define WARP_SIZE 32
+
 // Tiled histogram kernel:
 // Each block computes its partial histogram using per-warp tiling.
 // Each warp maintains its own sub-histogram in shared memory. After processing,
 // each warp reduces its sub-histogram and atomically accumulates into the block-level partial histogram.
 __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N, int numBins) {
-    // Fix: Compute flattened thread index for a 2D block.
+    // Compute flattened thread index for a 2D block.
     int tid = threadIdx.x + threadIdx.y * blockDim.x;
     int lane = tid % WARP_SIZE;
     int warp_id = tid / WARP_SIZE;
 
     // Allocate shared memory for all warps.
-    // We allocate numWarps * numBins ints.
+    // We allocate (numWarps * numBins) ints.
     extern __shared__ int sharedWarpHist[];
 
     // Initialize each warp's histogram.
@@ -39,16 +40,14 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     }
     __syncthreads();
 
-    // Each warp reduces its histogram rows.
-    for (int b = lane; b < numBins; b += WARP_SIZE) {
-        // Load the bin count from shared memory.
-        int count = sharedWarpHist[warp_id * numBins + b];
-        // Perform a warp-level reduction.
-        count = warpReduceSum(count);
-        // Let one thread per warp (lane 0) update a block-level partial histogram.
+    // Each warp reduces its histogram values for each bin.
+    // For numBins less than WARP_SIZE, let only the first numBins lanes handle reduction.
+    if (lane < numBins) {
+        int count = sharedWarpHist[warp_id * numBins + lane];
+        count = warpReduceSum(count);  // Reduces the count across the warp.
         if (lane == 0) {
-            // Accumulate contributions from each warp into the same partial histogram slot.
-            atomicAdd(&partialHist[blockIdx.x * numBins + b], count);
+            // Accumulate the reduction result for this bin from each warp into the block-level partial histogram.
+            atomicAdd(&partialHist[blockIdx.x * numBins + lane], count);
         }
     }
 }
