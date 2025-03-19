@@ -176,16 +176,7 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
 }
 
 // Reduction kernel: Sum partial histograms from all blocks into the final histogram.
-__global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
-    int bin = blockIdx.x * blockDim.x + threadIdx.x;
-    if (bin < numBins) {
-        int sum = 0;
-        for (int b = 0; b < numBlocks; b++) {
-            sum += partialHist[b * numBins + bin];
-        }
-        finalHist[bin] = sum;
-    }
-}
+
 
 // Host-callable function to launch the histogram kernels.
 // This function allocates the required partial histogram buffer,
