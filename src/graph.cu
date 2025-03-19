@@ -32,6 +32,12 @@ int main(int argc, char *argv[]) {
     dim3 block(4, 64);   // 4 x 64 = 256 threads per block.
     dim3 grid(gridSize);
     
+    // Ensure that VecDim is greater than GridSize.
+    if (N <= gridSize) {
+        fprintf(stderr, "Error: VecDim (%d) must be greater than GridSize (%d).\n", N, gridSize);
+        return 1;
+    }
+    
     // Shared memory sizes for each kernel:
     // Naive kernel: one histogram per block.
     // For optimized kernel:
