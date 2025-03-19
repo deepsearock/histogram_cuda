@@ -99,12 +99,12 @@ int main(int argc, char *argv[]) {
     double totalOps = 3.0 * N + ((double)N / tileSizeInts) * numBins;
     double elapsedSec = elapsedTime / 1000.0;
     double opsPerSec = totalOps / elapsedSec;
-    double measuredGFlops = opsPerSec / 1e9;
+    double measuredGops = opsPerSec / 1e9;
     
     printf("Total kernel execution time: %f ms\n", elapsedTime);
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Measured Throughput: %e ops/sec\n", opsPerSec);
-    printf("Measured Performance: %f GFLOPS (atomic ops metric)\n", measuredGFlops);
+    printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGops);
     
     // Calculate occupancy.
     cudaDeviceProp deviceProp;
