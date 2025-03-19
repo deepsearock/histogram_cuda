@@ -32,9 +32,9 @@ set_target_properties(comparison PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_link_libraries(comparison PRIVATE CUDA::cudart)
 
 add_executable(graph ./src/graph.cu)
-set_target_properties(cpu PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_link_libraries(cpu PRIVATE CUDA::cudart)
+set_target_properties(graph PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_link_libraries(graph PRIVATE CUDA::cudart)
 
 add_executable(histogram ./src/histogram.cu)
-set_target_properties(cublas PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_link_libraries(cublas PRIVATE CUDA::cudart CUDA::cublas)
+set_target_properties(histogram PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+target_link_libraries(histogram PRIVATE CUDA::cudart)
