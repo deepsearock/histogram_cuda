@@ -11,7 +11,8 @@
 // Each warp maintains its own sub-histogram in shared memory. After processing,
 // each warp reduces its sub-histogram and atomically accumulates into the block-level partial histogram.
 __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N, int numBins) {
-    int tid = threadIdx.x;
+    // Fix: Compute flattened thread index for a 2D block.
+    int tid = threadIdx.x + threadIdx.y * blockDim.x;
     int lane = tid % WARP_SIZE;
     int warp_id = tid / WARP_SIZE;
 
@@ -26,8 +27,8 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     __syncthreads();
 
     // Process data with a grid-stride loop.
-    int globalId = blockIdx.x * blockDim.x + tid;
-    int stride = gridDim.x * blockDim.x;
+    int globalId = blockIdx.x * blockDim.x * blockDim.y + tid;
+    int stride = gridDim.x * blockDim.x * blockDim.y;
     for (int i = globalId; i < N; i += stride) {
         int value = data[i];
         // Map full data range [0,1023] into [0, numBins-1].
