@@ -5,9 +5,9 @@
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
 
-#include "histogram_naive.cuh"
-#include "histogram_optimized.cuh"
-#include "histogram_tiling.cuh"
+#include "../include/histogram_naive.cuh"
+#include "../include/histogram_optimized.cuh"
+#include "../include/histogram_tiling.cuh"
 
 int main(int argc, char *argv[]) {
     // Usage: ./histogram_atomic -i <BinNum> <VecDim> [GridSize]
