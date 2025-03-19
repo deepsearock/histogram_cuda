@@ -34,14 +34,14 @@ int main(int argc, char *argv[]) {
     
     // Shared memory sizes for each kernel:
     // Naive kernel: one histogram per block.
-    size_t sharedMemSize_naive = 0; // no extra shared mem allocated, as the kernel allocates histogram of 'numBins' internally.
+    size_t sharedMemSize_naive = 0; // no extra shared mem allocated.
     // For optimized kernel:
     int tileSizeInts = block.x * block.y * 4;
     int numWarps = (block.x * block.y) / 32;
     size_t sharedMemSize_optimized = (2 * tileSizeInts + numWarps * /*numBins*/256) * sizeof(int);
     // For tiled kernel: only per-warp histogram.
     size_t sharedMemSize_tiled = (numWarps * /*numBins*/256) * sizeof(int);
-    // (Note: These shared mem sizes will be adjusted inside the loop below based on numBins.)
+    // (These shared mem sizes will be adjusted inside the loops based on numBins.)
     
     // Data sizes.
     size_t dataSize = N * sizeof(int);
@@ -60,7 +60,6 @@ int main(int argc, char *argv[]) {
     // Allocate device memory.
     int *d_data, *d_partialHist, *d_finalHist;
     cudaMalloc((void**)&d_data, dataSize);
-    // We'll allocate d_partialHist and d_finalHist based on maximum possible sizes.
     // Maximum partialHist is gridSize * max(numBins) integers.
     int maxBins = 256;
     size_t partialHistSize = gridSize * maxBins * sizeof(int);
@@ -77,8 +76,10 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to open CSV file for writing.\n");
         return 1;
     }
-    // Write CSV header.
-    fprintf(fp, "Kernel,NumBins,ExecutionTime_ms,TotalOps,Throughput_ops_sec,GFLOPS\n");
+    // Write a header reporting VecDim and GridSize.
+    fprintf(fp, "VecDim,%d,GridSize,%d\n", N, gridSize);
+    // Write CSV header with two columns: Kernel_Bins and Gops.
+    fprintf(fp, "Kernel_Bins,Gops\n");
     
     // Define the bin sizes to test.
     const int binSizes[7] = {4, 8, 16, 32, 64, 128, 256};
@@ -90,8 +91,6 @@ int main(int argc, char *argv[]) {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     
-    // For each kernel variant, loop through each bin setting.
-    
     // --- Naive Kernel ---
     for (int bi = 0; bi < 7; bi++) {
         int numBins = binSizes[bi];
@@ -100,8 +99,6 @@ int main(int argc, char *argv[]) {
         
         cudaEventRecord(start, 0);
         // Launch naive kernel.
-        // Note: histogram_naive_kernel writes directly to finalHist,
-        // so we pass numBins and use sharedMemSize_naive as configured in the kernel.
         histogram_naive_kernel<<<grid, block, numBins * sizeof(int)>>>(d_data, d_finalHist, N, numBins);
         cudaEventRecord(stop, 0);
         cudaEventSynchronize(stop);
@@ -109,24 +106,21 @@ int main(int argc, char *argv[]) {
         cudaEventElapsedTime(&elapsedTime, start, stop);
         double elapsedSec = elapsedTime / 1000.0;
         double opsPerSec = totalOps / elapsedSec;
-        double measuredGFlops = opsPerSec / 1e9;
+        double measuredGops = opsPerSec / 1e9;
         
-        fprintf(fp, "Naive,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGFlops);
+        fprintf(fp, "Naive-%d,%f\n", numBins, measuredGops);
     }
     
     // --- Optimized Kernel ---
     for (int bi = 0; bi < 7; bi++) {
         int numBins = binSizes[bi];
-        // Adjust shared memory size for optimized kernel.
         size_t sharedMemSizeOpt = (2 * tileSizeInts + numWarps * numBins) * sizeof(int);
         // Reset device buffers.
         cudaMemset(d_partialHist, 0, gridSize * numBins * sizeof(int));
         cudaMemset(d_finalHist, 0, numBins * sizeof(int));
         
         cudaEventRecord(start, 0);
-        // Launch optimized kernel.
         histogram_optimized_kernel<<<grid, block, sharedMemSizeOpt>>>(d_data, d_partialHist, N, numBins);
-        // Launch reduction kernel.
         int reduceBlockSize = 256;
         int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
         histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
@@ -136,24 +130,21 @@ int main(int argc, char *argv[]) {
         cudaEventElapsedTime(&elapsedTime, start, stop);
         double elapsedSec = elapsedTime / 1000.0;
         double opsPerSec = totalOps / elapsedSec;
-        double measuredGFlops = opsPerSec / 1e9;
+        double measuredGops = opsPerSec / 1e9;
         
-        fprintf(fp, "Optimized,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGFlops);
+        fprintf(fp, "Optimized-%d,%f\n", numBins, measuredGops);
     }
     
     // --- Tiled Kernel ---
     for (int bi = 0; bi < 7; bi++) {
         int numBins = binSizes[bi];
-        // Adjust shared memory size for tiled kernel.
         size_t sharedMemSizeTile = (numWarps * numBins) * sizeof(int);
         // Reset device buffers.
         cudaMemset(d_partialHist, 0, gridSize * numBins * sizeof(int));
         cudaMemset(d_finalHist, 0, numBins * sizeof(int));
         
         cudaEventRecord(start, 0);
-        // Launch tiled kernel.
         histogram_tiled_kernel<<<grid, block, sharedMemSizeTile>>>(d_data, d_partialHist, N, numBins);
-        // Launch reduction kernel.
         int reduceBlockSize = 256;
         int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
         histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
@@ -163,9 +154,9 @@ int main(int argc, char *argv[]) {
         cudaEventElapsedTime(&elapsedTime, start, stop);
         double elapsedSec = elapsedTime / 1000.0;
         double opsPerSec = totalOps / elapsedSec;
-        double measuredGFlops = opsPerSec / 1e9;
+        double measuredGops = opsPerSec / 1e9;
         
-        fprintf(fp, "Tiled,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGFlops);
+        fprintf(fp, "Tiled-%d,%f\n", numBins, measuredGops);
     }
     
     fclose(fp);
