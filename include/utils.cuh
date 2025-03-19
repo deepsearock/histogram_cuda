@@ -4,14 +4,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-
-// Templated function to measure kernel performance.
-// Parameters:
-//   grid, block, sharedMem - kernel launch configuration,
-//   totalOps - number of operations performed by the kernel (calculated externally)
-//   kernel - kernel function to launch,
-//   args... - kernel arguments.
-
 __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
     int bin = blockIdx.x * blockDim.x + threadIdx.x;
     if (bin < numBins) {

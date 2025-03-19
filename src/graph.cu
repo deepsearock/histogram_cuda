@@ -78,7 +78,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     // Write CSV header.
-    fprintf(fp, "Kernel,NumBins,ExecutionTime_ms,TotalOps,Throughput_ops_sec,Gops\n");
+    fprintf(fp, "Kernel,NumBins,ExecutionTime_ms,TotalOps,Throughput_ops_sec,GFLOPS\n");
     
     // Define the bin sizes to test.
     const int binSizes[7] = {4, 8, 16, 32, 64, 128, 256};
@@ -109,9 +109,9 @@ int main(int argc, char *argv[]) {
         cudaEventElapsedTime(&elapsedTime, start, stop);
         double elapsedSec = elapsedTime / 1000.0;
         double opsPerSec = totalOps / elapsedSec;
-        double measuredGops = opsPerSec / 1e9;
+        double measuredGFlops = opsPerSec / 1e9;
         
-        fprintf(fp, "Naive,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGops);
+        fprintf(fp, "Naive,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGFlops);
     }
     
     // --- Optimized Kernel ---
@@ -136,9 +136,9 @@ int main(int argc, char *argv[]) {
         cudaEventElapsedTime(&elapsedTime, start, stop);
         double elapsedSec = elapsedTime / 1000.0;
         double opsPerSec = totalOps / elapsedSec;
-        double measuredGops = opsPerSec / 1e9;
+        double measuredGFlops = opsPerSec / 1e9;
         
-        fprintf(fp, "Optimized,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGops);
+        fprintf(fp, "Optimized,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGFlops);
     }
     
     // --- Tiled Kernel ---
@@ -163,9 +163,9 @@ int main(int argc, char *argv[]) {
         cudaEventElapsedTime(&elapsedTime, start, stop);
         double elapsedSec = elapsedTime / 1000.0;
         double opsPerSec = totalOps / elapsedSec;
-        double measuredGops = opsPerSec / 1e9;
+        double measuredGFlops = opsPerSec / 1e9;
         
-        fprintf(fp, "Tiled,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGops);
+        fprintf(fp, "Tiled,%d,%f,%.0f,%e,%f\n", numBins, elapsedTime, totalOps, opsPerSec, measuredGFlops);
     }
     
     fclose(fp);

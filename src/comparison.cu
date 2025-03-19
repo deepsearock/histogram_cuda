@@ -101,13 +101,13 @@ int main(int argc, char *argv[]) {
     double totalOps = 3.0 * N + ((double)N / tileSizeInts) * numBins;
     double elapsedSecNaive = elapsedTimeNaive / 1000.0;
     double opsPerSecNaive = totalOps / elapsedSecNaive;
-    double measuredGFlopsNaive = opsPerSecNaive / 1e9;
+    double measuredGopsNaive = opsPerSecNaive / 1e9;
     
     printf("\n=== Naive Kernel ===\n");
     printf("Total execution time: %f ms\n", elapsedTimeNaive);
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Measured Throughput: %e ops/sec\n", opsPerSecNaive);
-    printf("Measured Performance: %f GFLOPS (atomic ops metric)\n", measuredGFlopsNaive);
+    printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGopsNaive);
     
     
     // --- 2) Optimized Kernel ---
@@ -130,13 +130,13 @@ int main(int argc, char *argv[]) {
     
     double elapsedSecOptimized = elapsedTimeOptimized / 1000.0;
     double opsPerSecOptimized = totalOps / elapsedSecOptimized;
-    double measuredGFlopsOptimized = opsPerSecOptimized / 1e9;
+    double measuredGopsOptimized = opsPerSecOptimized / 1e9;
     
     printf("\n=== Optimized Kernel ===\n");
     printf("Total execution time: %f ms\n", elapsedTimeOptimized);
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Measured Throughput: %e ops/sec\n", opsPerSecOptimized);
-    printf("Measured Performance: %f GFLOPS (atomic ops metric)\n", measuredGFlopsOptimized);
+    printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGopsOptimized);
     
     
     // --- 3) Tiled Kernel ---
@@ -157,13 +157,13 @@ int main(int argc, char *argv[]) {
     
     double elapsedSecTiled = elapsedTimeTiled / 1000.0;
     double opsPerSecTiled = totalOps / elapsedSecTiled;
-    double measuredGFlopsTiled = opsPerSecTiled / 1e9;
+    double measuredGopsTiled = opsPerSecTiled / 1e9;
     
     printf("\n=== Tiled Kernel ===\n");
     printf("Total execution time: %f ms\n", elapsedTimeTiled);
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Measured Throughput: %e ops/sec\n", opsPerSecTiled);
-    printf("Measured Performance: %f GFLOPS (atomic ops metric)\n", measuredGFlopsTiled);
+    printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGopsTiled);
     
     
     // Calculate occupancy for the optimized kernel (as an example).
