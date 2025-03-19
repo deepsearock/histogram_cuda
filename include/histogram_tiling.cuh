@@ -72,4 +72,4 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     }
 }
 
-#endif
+#endif // HISTOGRAM_OPTIMIZED_SIMPLE_CUH
