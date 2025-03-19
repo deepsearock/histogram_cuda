@@ -5,12 +5,8 @@
 #include <cooperative_groups.h>
 
 #include "../include/histogram_optimized.cuh"
+#include "../include/utils.cuh"
 namespace cg = cooperative_groups;
-
-// Define a prefetch function using inline PTX for global memory.
-__device__ inline void prefetch_global(const void *ptr) {
-    asm volatile("prefetch.global.L1 [%0];" :: "l"(ptr));
-}
 
 // Optimized histogram kernel with double buffering, vectorized loads,
 // per-warp histograms, bit-shift based bin calculation, and loop unrolling.
