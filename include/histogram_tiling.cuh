@@ -30,9 +30,10 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     int stride = gridDim.x * blockDim.x;
     for (int i = globalId; i < N; i += stride) {
         int value = data[i];
-        if (value >= 0 && value < numBins) {
-            // Each thread atomically updates the histogram for its warp in shared memory.
-            atomicAdd(&sharedWarpHist[warp_id * numBins + value], 1);
+        // Map full data range [0,1023] into [0, numBins-1].
+        int bin = (value * numBins) / 1024;
+        if (bin >= 0 && bin < numBins) {
+            atomicAdd(&sharedWarpHist[warp_id * numBins + bin], 1);
         }
     }
     __syncthreads();
@@ -51,6 +52,4 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     }
 }
 
-// Host-callable function to launch the tiled histogram kernels.
-// This version returns the combined performance metrics from both kernels.
 #endif // HISTOGRAM_TILED_CUH
