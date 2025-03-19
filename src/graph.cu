@@ -34,13 +34,10 @@ int main(int argc, char *argv[]) {
     
     // Shared memory sizes for each kernel:
     // Naive kernel: one histogram per block.
-    size_t sharedMemSize_naive = 0; // no extra shared mem allocated.
     // For optimized kernel:
     int tileSizeInts = block.x * block.y * 4;
     int numWarps = (block.x * block.y) / 32;
-    size_t sharedMemSize_optimized = (2 * tileSizeInts + numWarps * /*numBins*/256) * sizeof(int);
     // For tiled kernel: only per-warp histogram.
-    size_t sharedMemSize_tiled = (numWarps * /*numBins*/256) * sizeof(int);
     // (These shared mem sizes will be adjusted inside the loops based on numBins.)
     
     // Data sizes.
