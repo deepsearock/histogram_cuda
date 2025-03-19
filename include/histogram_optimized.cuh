@@ -6,20 +6,6 @@
 #include <cstdio>
 #include "utils.cuh"
 namespace cg = cooperative_groups;
-
-// Prefetch helper using inline PTX.
-__device__ inline void prefetch_global(const void *ptr) {
-    asm volatile("prefetch.global.L1 [%0];" :: "l"(ptr));
-}
-
-// Warp-level reduction using __shfl_down_sync.
-__inline__ __device__ int warpReduceSum(int val) {
-    for (int offset = 16; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
 // Optimized histogram kernel with double buffering and aggressive reduction.
 __global__ void histogram_optimized_kernel(const int *data, int *partialHist, int N, int numBins) {
     // Shared memory layout with padding:

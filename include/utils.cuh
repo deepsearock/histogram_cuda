@@ -30,6 +30,19 @@ __global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, 
     }
 }
 
+// Prefetch helper using inline PTX.
+__device__ inline void prefetch_global(const void *ptr) {
+    asm volatile("prefetch.global.L1 [%0];" :: "l"(ptr));
+}
+
+// Warp-level reduction using __shfl_down_sync.
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
 template<typename Kernel, typename... Args>
 PerfMetrics measureKernelPerformance(dim3 grid, dim3 block, size_t sharedMem, double totalOps, Kernel kernel, Args... args) {
     cudaEvent_t start, stop;

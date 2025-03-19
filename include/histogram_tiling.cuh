@@ -6,15 +6,6 @@
 #include "utils.cuh"
 
 #define WARP_SIZE 32
-
-// Simple warp-level reduction (assuming warp calls only).
-__inline__ __device__ int warpReduceSum(int val) {
-    for (int offset = WARP_SIZE/2; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
 // Tiled histogram kernel:
 // Each block computes its partial histogram using per-warp tiling.
 // Each warp maintains its own sub-histogram in shared memory. After processing,
