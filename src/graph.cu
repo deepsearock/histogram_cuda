@@ -60,7 +60,6 @@ int main(int argc, char *argv[]) {
     // Allocate device memory.
     int *d_data, *d_partialHist, *d_finalHist;
     cudaMalloc((void**)&d_data, dataSize);
-    // Maximum partialHist is gridSize * max(numBins) integers.
     int maxBins = 256;
     size_t partialHistSize = gridSize * maxBins * sizeof(int);
     size_t finalHistSize = maxBins * sizeof(int);
@@ -70,12 +69,17 @@ int main(int argc, char *argv[]) {
     // Copy input data to device.
     cudaMemcpy(d_data, h_data, dataSize, cudaMemcpyHostToDevice);
     
+    // Build CSV file name using gridSize and VecDim (N).
+    char filename[128];
+    sprintf(filename, "results-gridsize-%d-vecdim-%d.csv", gridSize, N);
+    
     // Open CSV file for writing results.
-    FILE *fp = fopen("results.csv", "w");
+    FILE *fp = fopen(filename, "w");
     if (!fp) {
-        fprintf(stderr, "Failed to open CSV file for writing.\n");
+        fprintf(stderr, "Failed to open CSV file %s for writing.\n", filename);
         return 1;
     }
+    
     // Write a header reporting VecDim and GridSize.
     fprintf(fp, "VecDim,%d,GridSize,%d\n", N, gridSize);
     // Write CSV header with two columns: Kernel_Bins and Gops.
