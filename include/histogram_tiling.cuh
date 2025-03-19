@@ -14,7 +14,6 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     int tid = threadIdx.x;
     int lane = tid % WARP_SIZE;
     int warp_id = tid / WARP_SIZE;
-    int numWarps = blockDim.x / WARP_SIZE;  // Assuming blockDim.x is a multiple of WARP_SIZE
 
     // Allocate shared memory for all warps.
     // We allocate numWarps * numBins ints.
