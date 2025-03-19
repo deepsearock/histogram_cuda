@@ -1,5 +1,5 @@
-#ifndef HISTOGRAM_TILED_CUH
-#define HISTOGRAM_TILED_CUH
+#ifndef HISTOGRAM_TILING_CUH
+#define HISTOGRAM_TILING_CUH
 
 #include <cuda.h>
 #include <cooperative_groups.h>
