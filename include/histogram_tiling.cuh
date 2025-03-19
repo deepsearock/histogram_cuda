@@ -61,18 +61,6 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     }
 }
 
-// Reduction kernel: Sum partial histograms from all blocks into the final histogram.
-__global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
-    int bin = blockIdx.x * blockDim.x + threadIdx.x;
-    if (bin < numBins) {
-        int sum = 0;
-        for (int b = 0; b < numBlocks; b++) {
-            sum += partialHist[b * numBins + bin];
-        }
-        finalHist[bin] = sum;
-    }
-}
-
 // Host-callable function to launch the tiled histogram kernels.
 // This version returns the combined performance metrics from both kernels.
 __host__ PerfMetrics runTiledHistogram(const int *d_data, int *d_finalHist, int N, int numBins,

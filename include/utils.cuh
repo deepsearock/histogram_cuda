@@ -18,6 +18,18 @@ struct PerfMetrics {
 //   totalOps - number of operations performed by the kernel (calculated externally)
 //   kernel - kernel function to launch,
 //   args... - kernel arguments.
+
+__global__ void histogram_reduce_kernel(const int *partialHist, int *finalHist, int numBins, int numBlocks) {
+    int bin = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bin < numBins) {
+        int sum = 0;
+        for (int b = 0; b < numBlocks; b++) {
+            sum += partialHist[b * numBins + bin];
+        }
+        finalHist[bin] = sum;
+    }
+}
+
 template<typename Kernel, typename... Args>
 PerfMetrics measureKernelPerformance(dim3 grid, dim3 block, size_t sharedMem, double totalOps, Kernel kernel, Args... args) {
     cudaEvent_t start, stop;
