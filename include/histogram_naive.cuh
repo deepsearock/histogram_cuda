@@ -38,22 +38,5 @@ __global__ void histogram_naive_kernel(const int *data, int *finalHist, int N, i
 // Host-callable function to launch the naive histogram kernel.
 // Note: The shared memory size should be at least numBins*sizeof(int).
 // This version returns the measured performance.
-__host__ PerfMetrics runNaiveHistogram(const int *d_data, int *d_finalHist, int N, int numBins, 
-                                         int gridSize, dim3 block, dim3 grid, size_t sharedMemSize) {
-    // Clear the final histogram on the device.
-    cudaMemset(d_finalHist, 0, numBins * sizeof(int));
-    
-    // Approximate total operations for the naive kernel.
-    double totalOpsNaive = static_cast<double>(N);
-    
-    PerfMetrics metricsNaive = measureKernelPerformance(grid, block, sharedMemSize,
-                                                         totalOpsNaive, histogram_naive_kernel,
-                                                         d_data, d_finalHist, N, numBins);
-    // Print measured performance.
-    printf("Naive Histogram Kernel: Bins = %d, Time = %.3f ms, Gops = %.3f\n",
-           numBins, metricsNaive.ms, metricsNaive.Gops);
-    
-    return metricsNaive;
-}
 
 #endif // HISTOGRAM_NAIVE_CUH
