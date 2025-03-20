@@ -15,8 +15,8 @@ __global__ void histogram_optimized_kernel(const int *data, int *partialHist, in
     const int warpSize = 32;
     int blockThreads = blockDim.x * blockDim.y;
     int tileSizeInts = blockThreads * 4;
-    int *tile0 = sharedMem;                      //first tile buffer
-    int *tile1 = sharedMem + tileSizeInts;         //second tile buffer
+    int *tile0 = sharedMem;//first tile buffer
+    int *tile1 = sharedMem + tileSizeInts;//second tile buffer
     int numWarps = blockThreads / warpSize;        
     int *warpHist = (int*)(sharedMem + 2 * tileSizeInts); //per-warp histogram region
 
