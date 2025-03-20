@@ -97,7 +97,74 @@ int main(int argc, char *argv[]) {
     printf("Total operations (approx.): %.0f\n", totalOps);
     printf("Measured Throughput: %e ops/sec\n", opsPerSecNaive);
     printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGopsNaive);
+    
+    // reset memory optimized kernel
+    cudaMemset(d_partialHist, 0, partialHistSize);
+    cudaMemset(d_finalHist, 0, finalHistSize);
+    cudaEventRecord(start, 0);
+    
+    histogram_optimized_kernel<<<grid, block, sharedMemSize_optimized>>>(d_data, d_partialHist, N, numBins);
+    int reduceBlockSize = 256;
+    int reduceGridSize = (numBins + reduceBlockSize - 1) / reduceBlockSize;
+    histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
+    
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    float elapsedTimeOptimized;
+    cudaEventElapsedTime(&elapsedTimeOptimized, start, stop);
+    
+    double elapsedSecOptimized = elapsedTimeOptimized / 1000.0;
+    double opsPerSecOptimized = totalOps / elapsedSecOptimized;
+    double measuredGopsOptimized = opsPerSecOptimized / 1e9;
+    
+    printf("\n=== Optimized Kernel ===\n");
+    printf("Total execution time: %f ms\n", elapsedTimeOptimized);
+    printf("Total operations (approx.): %.0f\n", totalOps);
+    printf("Measured Throughput: %e ops/sec\n", opsPerSecOptimized);
+    printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGopsOptimized);
+    
+    // reset memory tiled kernel
+    cudaMemset(d_partialHist, 0, partialHistSize);
+    cudaMemset(d_finalHist, 0, finalHistSize);
+    cudaEventRecord(start, 0);
 
+    histogram_tiled_kernel<<<grid, block, sharedMemSize_tiled>>>(d_data, d_partialHist, N, numBins);
+    histogram_reduce_kernel<<<reduceGridSize, reduceBlockSize>>>(d_partialHist, d_finalHist, numBins, gridSize);
+    
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    float elapsedTimeTiled;
+    cudaEventElapsedTime(&elapsedTimeTiled, start, stop);
+    
+    double elapsedSecTiled = elapsedTimeTiled / 1000.0;
+    double opsPerSecTiled = totalOps / elapsedSecTiled;
+    double measuredGopsTiled = opsPerSecTiled / 1e9;
+    
+    printf("\n=== Tiled Kernel ===\n");
+    printf("Total execution time: %f ms\n", elapsedTimeTiled);
+    printf("Total operations (approx.): %.0f\n", totalOps);
+    printf("Measured Throughput: %e ops/sec\n", opsPerSecTiled);
+    printf("Measured Performance: %f Gops (atomic ops metric)\n", measuredGopsTiled);
+
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    int maxThreadsPerSM = deviceProp.maxThreadsPerMultiProcessor;
+    int activeBlocks;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks, histogram_optimized_kernel, blockSizeTotal, sharedMemSize_optimized);
+    float occupancy = (activeBlocks * blockSizeTotal) / (float) maxThreadsPerSM;
+    occupancy = occupancy * 100.0f;
+    printf("\nOccupancy per SM (Optimized Kernel): %f %%\n", occupancy);
+
+    int coresPerSM = 64;
+    int totalCores = deviceProp.multiProcessorCount * coresPerSM;
+    double clockHz = deviceProp.clockRate * 1000.0;
+    double theoreticalOps = totalCores * clockHz * 2;
+    printf("Device: %s\n", deviceProp.name);
+    printf("Number of SMs: %d\n", deviceProp.multiProcessorCount);
+    printf("Cores per SM: %d\n", coresPerSM);
+    printf("Total CUDA Cores: %d\n", totalCores);
+    printf("Clock Rate: %0.2f GHz\n", clockHz / 1e9);
+    printf("Theoretical Peak Ops/sec (int): %e ops/sec\n", theoreticalOps);
 
 
     // histogram check
