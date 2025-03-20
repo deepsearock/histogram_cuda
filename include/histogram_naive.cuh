@@ -5,13 +5,13 @@
 #include <cstdio>
 #include "utils.cuh"
 
-
-// naive approach 
+// naive approach
 __global__ void histogram_naive_kernel(const int *data, int *finalHist, int N, int numBins) {
     extern __shared__ int sharedHist[];
-    int tid = threadIdx.x;
-    int blockThreads = blockDim.x;
-
+    // indexing
+    int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    int blockThreads = blockDim.x * blockDim.y;
+    
     // shared histogram
     for (int b = tid; b < numBins; b += blockThreads) {
         sharedHist[b] = 0;
@@ -19,8 +19,8 @@ __global__ void histogram_naive_kernel(const int *data, int *finalHist, int N, i
     __syncthreads();
     
     // grid stride loop
-    int globalId = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
+    int globalId = (blockIdx.x * blockThreads) + tid;
+    int stride = blockThreads * gridDim.x;
     for (int i = globalId; i < N; i += stride) {
         int value = data[i];
         if (value >= 0 && value < numBins) {
@@ -29,7 +29,7 @@ __global__ void histogram_naive_kernel(const int *data, int *finalHist, int N, i
     }
     __syncthreads();
     
-    // each block updates the final histogram
+    // each block updates final histogram
     for (int b = tid; b < numBins; b += blockThreads) {
         atomicAdd(&finalHist[b], sharedHist[b]);
     }
