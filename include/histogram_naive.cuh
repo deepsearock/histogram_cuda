@@ -5,20 +5,20 @@
 #include <cstdio>
 #include "utils.cuh"
 
-// Naive histogram kernel: Each block builds a shared memory histogram
-// and atomically updates the final histogram in global memory.
+
+// naive approach 
 __global__ void histogram_naive_kernel(const int *data, int *finalHist, int N, int numBins) {
     extern __shared__ int sharedHist[];
     int tid = threadIdx.x;
     int blockThreads = blockDim.x;
 
-    // Initialize the shared histogram.
+    // shared histogram
     for (int b = tid; b < numBins; b += blockThreads) {
         sharedHist[b] = 0;
     }
     __syncthreads();
     
-    // Process input data with a grid-stride loop.
+    // grid stride loop
     int globalId = blockIdx.x * blockDim.x + tid;
     int stride = blockDim.x * gridDim.x;
     for (int i = globalId; i < N; i += stride) {
@@ -29,14 +29,10 @@ __global__ void histogram_naive_kernel(const int *data, int *finalHist, int N, i
     }
     __syncthreads();
     
-    // Each block atomically updates the final global histogram.
+    // each block updates the final histogram
     for (int b = tid; b < numBins; b += blockThreads) {
         atomicAdd(&finalHist[b], sharedHist[b]);
     }
 }
-
-// Host-callable function to launch the naive histogram kernel.
-// Note: The shared memory size should be at least numBins*sizeof(int).
-// This version returns the measured performance.
 
 #endif // HISTOGRAM_NAIVE_CUH

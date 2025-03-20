@@ -9,32 +9,30 @@ namespace cg = cooperative_groups;
 
 #define WARP_SIZE 32
 
-// Tiled histogram kernel without vectorized loads or double buffering.
-// Uses a grid-stride loop to process one int at a time,
-// builds a per-warp histogram in shared memory, then reduces into a block-level partial histogram.
+//tiled strategy
 __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N, int numBins) {
-    // Flatten thread index for the 2D block.
+    // indexing
     int tid = threadIdx.x + threadIdx.y * blockDim.x;
     int lane = tid % WARP_SIZE;
     int warp_id = tid / WARP_SIZE;
     int blockThreads = blockDim.x * blockDim.y;
     int numWarps = blockThreads / WARP_SIZE;
     
-    // Shared memory allocation for per-warp histograms.
+
+    //allocate shared memory
     extern __shared__ int sharedWarpHist[];
     
-    // Initialize shared histogram for each warp.
     for (int b = lane; b < numWarps * numBins; b += WARP_SIZE) {
         sharedWarpHist[b] = 0;
     }
     __syncthreads();
     
-    // Process data with a grid-stride loop.
+    // grid stride loop
     int globalId = blockIdx.x * blockThreads + tid;
     int stride = gridDim.x * blockThreads;
     for (int i = globalId; i < N; i += stride) {
         int value = data[i];
-        // Map full data range [0,1023] into [0, numBins-1].
+        // map data
         int bin = (value * numBins) / 1024;
         if (bin >= 0 && bin < numBins) {
             atomicAdd(&sharedWarpHist[warp_id * numBins + bin], 1);
@@ -42,8 +40,7 @@ __global__ void histogram_tiled_kernel(const int *data, int *partialHist, int N,
     }
     __syncthreads();
     
-    // Reduce per-warp histograms into a block-level (partial) histogram.
-    // Let only warp 0 perform the reduction.
+    // reduce warp level histogram to block level
     if (warp_id == 0) {
         for (int b = lane; b < numBins; b += WARP_SIZE) {
             int sum = 0;
