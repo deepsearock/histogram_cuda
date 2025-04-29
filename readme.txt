@@ -1,9 +1,4 @@
-Lab2: histogram
-
-Zhaorui Wang
-cwid: 20007447
-
-The lab and spreadsheet with some data is in here aswell as groovy extension program with some pseudo code for questions in assignment
+Histogram in cuda
 
 In order to build you must run
 
